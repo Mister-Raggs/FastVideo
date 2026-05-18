@@ -40,6 +40,12 @@ from fastvideo.api.sampling_param import SamplingParam
 
 MODEL = os.environ.get("MODEL", "Wan-AI/Wan2.1-T2V-1.3B-Diffusers")
 COMPILE = os.environ.get("COMPILE") == "1"
+# Tier-2: TC_MODE=reduce-overhead enables CUDA-graph capture. This only
+# pays off once per-layer graph breaks are gone (cudagraphs cannot span
+# a break) — i.e. it tests exactly what the layerwise-offload-hook fix
+# unblocked. Empty -> default inductor (no cudagraphs).
+TC_MODE = os.environ.get("TC_MODE", "").strip()
+TC_KWARGS = {"mode": TC_MODE} if (COMPILE and TC_MODE) else {}
 
 PROMPT = (
     "A high-definition video of a robotic arm welding a metal structure, "
@@ -70,8 +76,11 @@ def _generate(generator: VideoGenerator, tag: str, save: bool) -> float:
 
 def main() -> None:
     mode = "COMPILE" if COMPILE else "BASELINE"
+    if TC_KWARGS:
+        mode += f"+{TC_MODE}"
     print(f"[ab] MODEL={MODEL}  mode={mode}  "
-          f"enable_torch_compile={COMPILE}", flush=True)
+          f"enable_torch_compile={COMPILE}  torch_compile_kwargs={TC_KWARGS}",
+          flush=True)
 
     generator = VideoGenerator.from_pretrained(
         MODEL,
@@ -82,6 +91,7 @@ def main() -> None:
         text_encoder_cpu_offload=True,
         pin_cpu_memory=True,
         enable_torch_compile=COMPILE,
+        torch_compile_kwargs=TC_KWARGS,
     )
 
     # Warmup — un-measured. When COMPILE, this pays the one-time build.
