@@ -1,11 +1,23 @@
 """Summarize the graph-break / recompile log from compile_graphbreaks.py.
 
-Turns the raw TORCH_LOGS stream into a triage table:
-  - unique break reasons, with counts
-  - the user-code frame (fastvideo/...) each break maps to
-  - recompile events (guard failures) and their reason
-  - a hot/cold hint: breaks whose frame is in a transformer block /
-    attention / the denoise path matter far more than setup-time breaks
+Hardened parser. The raw stream is noisy: every torch record is wrapped
+in a `(Worker pid=NNNN) [rankK]:V<ts> ... [__graph_breaks]` log prefix,
+and each break is followed by boilerplate ("For more details ...",
+"NOTE: the most recent ...") plus a code excerpt. The previous version
+parsed those prefix/boilerplate lines as bogus "reasons" and only
+flagged `dits/`-style frames as HOT — so it mis-classified the
+per-layer layerwise-offload-hook cluster (the actual hottest one) as
+cold. This version:
+
+  - strips the torch-log prefix up to and including `[__graph_breaks]`
+  - ignores boilerplate continuation lines
+  - pairs each break's *reason* with the nearest `fastvideo/...:LINE`
+    user frame within the same record
+  - flags HOT by per-invocation cost location: anything in the model
+    forward OR a per-layer hook / denoise path (paid layers x steps),
+    not just `dits/`
+
+Feeds the nsys-ai "profile finding -> source attribution" direction.
 
 Usage:
     python profiling/analyze_graphbreaks.py /tmp/gb.log
@@ -15,54 +27,92 @@ import collections
 import re
 import sys
 
-HOT_HINTS = ("dits/", "attention", "transformer", "block", "denois",
-             "rotary", "norm", "modulation")
+# Frames whose break is paid per-layer and/or per-step (the expensive
+# ones). Per-layer hooks and the denoise loop count as hot even though
+# they are not under dits/.
+HOT_HINTS = (
+    "models/dits/", "attention", "transformer", "/block", "denois",
+    "rotary", "norm", "modulation", "hooks/", "layerwise", "offload",
+    "pipelines/stages/denoising",
+)
+
+# Lines that are torch/boilerplate, never a real break reason.
+_BOILERPLATE = re.compile(
+    r"(for more details|NOTE: the most recent|torch/_dynamo|traceback|"
+    r"^\s*File \"|symbolic_convert|GRAPHBREAK-RUN|COMPILE-AND-RUN|"
+    r"^\s*\^+\s*$)",
+    re.IGNORECASE,
+)
+# Strip the worker/log prefix up to and including the [__graph_breaks]
+# (or [__recompiles]) tag so we key on the message, not the log line.
+_PREFIX = re.compile(r"^.*?\[__(?:graph_breaks|recompiles)\]\s*")
+_FRAME = re.compile(r"(fastvideo/[\w/]+\.py:\d+)")
+_REASON = re.compile(
+    r"(Graph break.*|when attempting to trace \w+.*|"
+    r"in user code at .*|Reason:.*)", re.IGNORECASE)
+
+
+def _clean(ln: str) -> str:
+    return _PREFIX.sub("", ln).strip()
 
 
 def main(path: str) -> None:
-    text = open(path, errors="replace").read()
-    lines = text.splitlines()
+    lines = open(path, errors="replace").read().splitlines()
 
-    # torch logs a graph break as a line containing "Graph break"
-    # (TORCHDYNAMO_VERBOSE adds the reason + a "due to:" / source frame).
-    breaks = []
-    recompiles = []
-    for i, ln in enumerate(lines):
-        low = ln.lower()
-        if "graph break" in low:
-            ctx = " ".join(lines[i:i + 6])
-            frame = re.search(r"(fastvideo/[\w/]+\.py:\d+)", ctx)
-            reason = re.search(r"[Gg]raph break[:\s]+(.*)", ln)
-            breaks.append((
-                reason.group(1).strip()[:140] if reason else ln.strip()[:140],
-                frame.group(1) if frame else "?",
-            ))
-        elif "recompiling" in low or "recompile" in low and "due to" in low:
-            recompiles.append(ln.strip()[:160])
+    breaks: list[tuple[str, str]] = []
+    recompiles: list[str] = []
 
-    print(f"\n{'='*70}\nGRAPH BREAKS: {len(breaks)} total\n{'='*70}")
+    for i, raw in enumerate(lines):
+        low = raw.lower()
+        is_break = "graph break" in low or "[__graph_breaks]" in low
+        is_recompile = "recompiling" in low or (
+            "recompile" in low and "due to" in low)
+        if not (is_break or is_recompile):
+            continue
+
+        msg = _clean(raw)
+        if not msg or _BOILERPLATE.search(msg):
+            continue
+
+        if is_recompile:
+            recompiles.append(msg[:160])
+            continue
+
+        # Pair the reason with the nearest fastvideo frame in this record
+        # window (frame may be on a following line of the same record).
+        window = " ".join(_clean(x) for x in lines[i:i + 6])
+        frame_m = _FRAME.search(window)
+        reason_m = _REASON.search(msg) or _REASON.search(window)
+        reason = (reason_m.group(1) if reason_m else msg).strip()[:140]
+        # Drop records that are only a bare frame line with no reason
+        # text and no resolvable frame (continuation of a counted break).
+        if reason.lower().startswith("in user code at") and not frame_m:
+            continue
+        breaks.append((reason, frame_m.group(1) if frame_m else "?"))
+
     by_reason = collections.Counter(r for r, _ in breaks)
+    print(f"\n{'='*72}\nGRAPH BREAKS: {len(breaks)} total, "
+          f"{len(by_reason)} distinct reasons\n{'='*72}")
+    hot_total = 0
     for reason, n in by_reason.most_common():
         frames = sorted({f for r, f in breaks if r == reason and f != "?"})
         hot = any(any(h in f for h in HOT_HINTS) for f in frames)
-        tag = "  <<< HOT (in model fwd)" if hot else ""
-        print(f"\n[{n}x]{tag}\n  reason: {reason}")
+        if hot:
+            hot_total += n
+        print(f"\n[{n}x]{'  <<< HOT (per-layer / per-step)' if hot else ''}"
+              f"\n  reason: {reason}")
         for f in frames[:6]:
             print(f"  at:     {f}")
 
-    print(f"\n{'='*70}\nRECOMPILES: {len(recompiles)} "
-          f"(guard failures -> re-trace; dynamic-shape thrash if many)"
-          f"\n{'='*70}")
-    for r in collections.Counter(recompiles).most_common(10):
-        print(f"  [{r[1]}x] {r[0]}")
+    print(f"\n{'='*72}\nRECOMPILES: {len(recompiles)} "
+          f"(guard failures -> re-trace; many = dynamic-shape thrash)"
+          f"\n{'='*72}")
+    for r, c in collections.Counter(recompiles).most_common(10):
+        print(f"  [{c}x] {r}")
 
-    hot_breaks = sum(
-        n for reason, n in by_reason.items()
-        for f in {f for r, f in breaks if r == reason}
-        if any(h in f for h in HOT_HINTS))
-    print(f"\n{'='*70}\nTRIAGE: {hot_breaks} break-instances are in the model "
-          f"forward (hot). Fix those first — a break inside the per-layer "
-          f"loop is paid every layer x every step.\n{'='*70}")
+    print(f"\n{'='*72}\nTRIAGE: {hot_total} break-instances are HOT "
+          f"(model fwd / per-layer hook / denoise loop) — paid "
+          f"layers x steps. Fix those first.\n{'='*72}")
 
 
 if __name__ == "__main__":
