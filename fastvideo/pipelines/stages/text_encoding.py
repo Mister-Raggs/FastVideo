@@ -127,6 +127,14 @@ class TextEncodingStage(PipelineStage):
                     for nm in neg_masks_list:
                         batch.negative_attention_mask.append(nm)
                 return batch
+            # Padding target policy. With cfg_pad_embeds_to_max_length
+            # (default) we pad to the FULL tokenizer max_length to match
+            # the diffusers-canonical training distribution — every
+            # cross-attention then attends over max_length (mostly zero)
+            # K/V positions. With it disabled we trim to the longest real
+            # prompt across pos+neg so the DiT only processes real tokens
+            # (cheaper per step, deviates from the canonical recipe).
+            _pad_to_max = fastvideo_args.cfg_pad_embeds_to_max_length
             for idx, (pe, ne) in enumerate(zip(prompt_embeds_list, neg_embeds_list, strict=True)):
                 if pe.dim() < 2 or ne.dim() < 2:
                     continue
@@ -134,12 +142,16 @@ class TextEncodingStage(PipelineStage):
                 ne_mask = neg_masks_list[idx] if idx < len(neg_masks_list) else None
                 pe_real_len = (int(pe_mask.gt(0).sum(dim=-1).max().item()) if pe_mask is not None else pe.shape[1])
                 ne_real_len = (int(ne_mask.gt(0).sum(dim=-1).max().item()) if ne_mask is not None else ne.shape[1])
-                # Pad to the FULL tokenizer max_length (= shape after
-                # padding="max_length"), matching diffusers. Both pe and
-                # ne come out of the tokenizer at this shape already
-                # since we forced padding="max_length" upstream, but be
-                # defensive in case any encoder bypasses that.
-                target_len = max(pe.shape[1], ne.shape[1], pe_real_len, ne_real_len)
+                # max_length path: pad to the shape after
+                # padding="max_length" (pe/ne already come out at this
+                # shape since we forced it upstream; the pe.shape[1] terms
+                # are defensive in case any encoder bypasses that).
+                # trimmed path: pad both to the longest real prompt only,
+                # which still keeps pos+neg shapes matched for the CFG cat.
+                if _pad_to_max:
+                    target_len = max(pe.shape[1], ne.shape[1], pe_real_len, ne_real_len)
+                else:
+                    target_len = max(pe_real_len, ne_real_len)
                 prompt_embeds_list[idx] = self._trim_then_zero_pad(pe, pe_real_len, target_len)
                 neg_embeds_list[idx] = self._trim_then_zero_pad(ne, ne_real_len, target_len)
                 if pe_mask is not None and idx < len(prompt_masks_list):

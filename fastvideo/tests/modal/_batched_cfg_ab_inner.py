@@ -41,6 +41,10 @@ def main() -> int:
     model_id: str = cfg["model_id"]
     num_gpus: int = cfg["num_gpus"]
     use_batched_cfg: bool = cfg["use_batched_cfg"]
+    # W3g: pad batched-CFG text embeds to tokenizer max_length
+    # (canonical, default) vs. trim to the longest real prompt. Default
+    # True keeps the W3b A/B (axis = use_batched_cfg) bit-for-bit.
+    cfg_pad_embeds_to_max_length: bool = cfg.get("cfg_pad_embeds_to_max_length", True)
     enable_compile: bool = cfg.get("enable_compile", False)
     dit_precision: str = cfg.get("dit_precision", "bf16")
     height: int = cfg["height"]
@@ -62,6 +66,7 @@ def main() -> int:
         model_id,
         num_gpus=num_gpus,
         use_batched_cfg=use_batched_cfg,
+        cfg_pad_embeds_to_max_length=cfg_pad_embeds_to_max_length,
         enable_torch_compile=enable_compile,
         dit_precision=dit_precision,
     )
@@ -73,6 +78,11 @@ def main() -> int:
         raise RuntimeError(f"use_batched_cfg did not propagate: requested {use_batched_cfg}, "
                            f"resolved {resolved_flag}")
     print(f"[inner] use_batched_cfg resolved to {resolved_flag}", flush=True)
+    resolved_pad = getattr(generator.fastvideo_args, "cfg_pad_embeds_to_max_length", None)
+    if resolved_pad is not cfg_pad_embeds_to_max_length:
+        raise RuntimeError(f"cfg_pad_embeds_to_max_length did not propagate: requested "
+                           f"{cfg_pad_embeds_to_max_length}, resolved {resolved_pad}")
+    print(f"[inner] cfg_pad_embeds_to_max_length resolved to {resolved_pad}", flush=True)
 
     os.makedirs(output_dir, exist_ok=True)
     records = []
@@ -102,7 +112,8 @@ def main() -> int:
             raise RuntimeError(f"no .mp4 produced for prompt {i} at {prompt_out}")
         records.append({"i": i, "wall_s": wall, "mp4": mp4s[-1]})
         label = "batched" if use_batched_cfg else "sequential"
-        print(f"[inner] [{label}] prompt {i}: {wall:.3f}s -> {mp4s[0]}", flush=True)
+        pad_label = "pad-max" if cfg_pad_embeds_to_max_length else "pad-trim"
+        print(f"[inner] [{label}/{pad_label}] prompt {i}: {wall:.3f}s -> {mp4s[0]}", flush=True)
 
     with open(args.results_json, "w") as f:
         json.dump(records, f)

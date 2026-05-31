@@ -40,6 +40,7 @@ surfaces:
       transformer_quant: generator.engine.quantization.transformer_quant
       disable_autocast: generator.engine.disable_autocast
       use_batched_cfg: generator.engine.use_batched_cfg
+      cfg_pad_embeds_to_max_length: generator.engine.cfg_pad_embeds_to_max_length
       enable_stage_verification: generator.engine.enable_stage_verification
       prompt_txt: request.inputs.prompt_path
       override_text_encoder_safetensors: generator.pipeline.components.text_encoder_weights

@@ -161,6 +161,18 @@ class FastVideoArgs:
     # that aren't covered by the batched path yet).
     use_batched_cfg: bool = True
 
+    # Pad batched-CFG text embeddings to the full tokenizer max_length
+    # (diffusers-canonical recipe) vs. trim to the longest real prompt.
+    # Only affects the Wan/Cosmos trim+zero-pad path under CFG. True
+    # (default) keeps the canonical training-distribution recipe: every
+    # cross-attention attends over max_length (e.g. 512) K/V positions,
+    # most of them zero-padded. False trims pos+neg to
+    # max(real_pos_len, real_neg_len) so the DiT only attends over real
+    # tokens (~55-98) — cheaper per step, at the cost of deviating from
+    # the canonical recipe. SSIM impact is workload-dependent; measure
+    # before relying on it for quality-sensitive runs.
+    cfg_pad_embeds_to_max_length: bool = True
+
     # VSA parameters
     VSA_sparsity: float = 0.0  # inference/validation sparsity
 
@@ -556,6 +568,17 @@ class FastVideoArgs:
             "reduces per-step launch + memory overhead. Falls back to "
             "the sequential path when V2V/I2V/TI2V/action/camera "
             "conditioning is present.",
+        )
+        parser.add_argument(
+            "--cfg-pad-embeds-to-max-length",
+            action=StoreBoolean,
+            default=FastVideoArgs.cfg_pad_embeds_to_max_length,
+            help="For the Wan/Cosmos batched-CFG trim+zero-pad recipe: "
+            "pad text embeddings to the full tokenizer max_length "
+            "(diffusers-canonical, default) vs. trim to the longest real "
+            "prompt so the DiT cross-attention only processes real "
+            "tokens. Trimming is cheaper per step but deviates from the "
+            "canonical training distribution — measure SSIM before use.",
         )
         parser.add_argument(
             "--torch-compile-kwargs",

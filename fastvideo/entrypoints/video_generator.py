@@ -95,6 +95,7 @@ _FROM_PRETRAINED_CONVENIENCE_KWARGS = frozenset({
     "enable_torch_compile",
     "torch_compile_kwargs",
     "use_batched_cfg",
+    "cfg_pad_embeds_to_max_length",
     "output_type",
     "nvfp4_fa4",
 })

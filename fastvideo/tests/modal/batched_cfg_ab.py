@@ -152,7 +152,7 @@ git submodule update --init --recursive
 
 def _run_pass(*, use_batched_cfg: bool, model_id: str, num_gpus: int, height: int, width: int, num_frames: int,
               num_inference_steps: int, output_dir: str, enable_compile: bool, dit_precision: str = "bf16",
-              num_prompts: int | None = None) -> list[dict]:
+              num_prompts: int | None = None, cfg_pad_embeds_to_max_length: bool = True) -> list[dict]:
     """Invoke the inner pass script (``_batched_cfg_ab_inner.py``) via
     /opt/venv/bin/python so FastVideo runs inside the image's venv.
 
@@ -172,6 +172,7 @@ def _run_pass(*, use_batched_cfg: bool, model_id: str, num_gpus: int, height: in
         "model_id": model_id,
         "num_gpus": num_gpus,
         "use_batched_cfg": use_batched_cfg,
+        "cfg_pad_embeds_to_max_length": cfg_pad_embeds_to_max_length,
         "enable_compile": enable_compile,
         "dit_precision": dit_precision,
         "height": height,
@@ -268,7 +269,20 @@ def run_ab(
     enable_compile: bool = False,
     dit_precision: str = "bf16",
     num_prompts: int = 0,
+    pad_ab: bool = False,
 ):
+    """A/B axis selector via ``pad_ab``:
+
+      * pad_ab=False (default, W3b): baseline = sequential CFG
+        (use_batched_cfg=False), patched = batched CFG
+        (use_batched_cfg=True). Both keep the canonical max_length pad.
+        Measures the batched-vs-sequential mechanism.
+      * pad_ab=True (W3g): both passes use batched CFG; baseline keeps
+        the diffusers-canonical max_length pad
+        (cfg_pad_embeds_to_max_length=True), patched trims to the
+        longest real prompt (cfg_pad_embeds_to_max_length=False).
+        Measures the SSIM cost + wall recovery of dropping the pad.
+    """
     import subprocess
 
     if model_preset not in MODEL_PRESETS:
@@ -302,19 +316,35 @@ def run_ab(
         num_prompts=(num_prompts if num_prompts > 0 else None),
     )
 
-    # Output dirs are tagged by mode so eager and compile runs don't
-    # clobber each other (both legs may run in the same Volume).
+    # Output dirs are tagged by mode + axis so eager/compile and
+    # batched-vs-pad runs don't clobber each other (all legs may share
+    # one Volume).
     mode_tag = "compile" if enable_compile else "eager"
     if dit_precision != "bf16":
         mode_tag = f"{mode_tag}-{dit_precision}"
+    if pad_ab:
+        mode_tag = f"{mode_tag}-padab"
     baseline_dir = f"/root/data/ab_out/{model_preset}/{mode_tag}/baseline"
     patched_dir = f"/root/data/ab_out/{model_preset}/{mode_tag}/patched"
 
-    print(f"\n--- baseline pass (use_batched_cfg=False, mode={mode_tag}) on {model_preset} ---")
-    baseline = _run_pass(use_batched_cfg=False, output_dir=baseline_dir, **common)
-
-    print(f"\n--- patched pass (use_batched_cfg=True, mode={mode_tag}) on {model_preset} ---")
-    patched = _run_pass(use_batched_cfg=True, output_dir=patched_dir, **common)
+    if pad_ab:
+        # W3g axis: both passes batched; vary only the pad target. SSIM
+        # is then "trimmed vs diffusers-canonical max_length", which is
+        # the quality question W3g exists to answer.
+        baseline_label = "batched, cfg_pad_embeds_to_max_length=True (canonical max_length)"
+        patched_label = "batched, cfg_pad_embeds_to_max_length=False (trim to longest real prompt)"
+        print(f"\n--- baseline pass ({baseline_label}, mode={mode_tag}) on {model_preset} ---")
+        baseline = _run_pass(use_batched_cfg=True, cfg_pad_embeds_to_max_length=True, output_dir=baseline_dir,
+                             **common)
+        print(f"\n--- patched pass ({patched_label}, mode={mode_tag}) on {model_preset} ---")
+        patched = _run_pass(use_batched_cfg=True, cfg_pad_embeds_to_max_length=False, output_dir=patched_dir,
+                            **common)
+    else:
+        # W3b axis: sequential vs batched CFG, canonical pad in both.
+        print(f"\n--- baseline pass (use_batched_cfg=False, mode={mode_tag}) on {model_preset} ---")
+        baseline = _run_pass(use_batched_cfg=False, output_dir=baseline_dir, **common)
+        print(f"\n--- patched pass (use_batched_cfg=True, mode={mode_tag}) on {model_preset} ---")
+        patched = _run_pass(use_batched_cfg=True, output_dir=patched_dir, **common)
 
     rows = _pairwise_ssim_lpips(baseline, patched)
     _print_table(rows)
@@ -500,11 +530,18 @@ def main(
     enable_compile: bool = False,
     dit_precision: str = "bf16",
     num_prompts: int = 0,
+    pad_ab: bool = False,
 ):
     """Drive the A/B from your laptop. ``gpu`` is the Modal GPU class
     string (``L40S``, ``H100``, ``A100-80GB``, ...). ``num_gpus=0``
     uses the model preset default. ``git_repo`` defaults to the ``fork``
-    remote (where W3 sub-branches live) and falls back to ``origin``."""
+    remote (where W3 sub-branches live) and falls back to ``origin``.
+
+    ``--pad-ab`` switches the A/B axis from batched-vs-sequential (W3b)
+    to canonical-pad-vs-trimmed-pad (W3g). For a W3g run also pass
+    ``--git-ref perf/wan-batched-cfg-trim-padding`` so the container
+    checks out the branch that carries the cfg_pad_embeds_to_max_length
+    flag."""
     import subprocess
 
     if model not in MODEL_PRESETS:
@@ -528,9 +565,10 @@ def main(
     # FA3 install only on Hopper (capability 9.0). L40S is sm_89 and
     # can't use FA3 — stays on the image's baked FA2.
     install_fa3 = gpu.upper().startswith("H100") or gpu.upper().startswith("H200")
+    axis = "pad (canonical vs trimmed)" if pad_ab else "batched vs sequential"
     print(f"GPU: {gpu}:{num_gpus}  model: {model}  ref: {git_ref}  install_fa3: {install_fa3}  "
           f"enable_compile: {enable_compile}  dit_precision: {dit_precision}  num_prompts: "
-          f"{num_prompts or 'all'}  repo: {git_repo}")
+          f"{num_prompts or 'all'}  axis: {axis}  repo: {git_repo}")
 
     # Re-bind the GPU class at call time (Modal supports passing gpu via
     # .with_options).
@@ -543,4 +581,5 @@ def main(
         enable_compile=enable_compile,
         dit_precision=dit_precision,
         num_prompts=num_prompts,
+        pad_ab=pad_ab,
     )
