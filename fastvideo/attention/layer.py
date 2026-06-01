@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import dataclasses
+
 import torch
 import torch.nn as nn
 
@@ -260,23 +262,47 @@ class LocalAttention(nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         freqs_cis: tuple[torch.Tensor, torch.Tensor] | None = None,
+        k_lens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Apply local attention between query, key and value tensors.
-        
+
         Args:
-            q (torch.Tensor): Query tensor of shape [batch_size, seq_len, num_heads, head_dim]
-            k (torch.Tensor): Key tensor of shape [batch_size, seq_len, num_heads, head_dim] 
-            v (torch.Tensor): Value tensor of shape [batch_size, seq_len, num_heads, head_dim]
-            
-        Returns:
-            torch.Tensor: Output tensor after local attention
+            q: [batch_size, q_seq_len, num_heads, head_dim]
+            k: [batch_size, k_seq_len, num_heads, head_dim]
+            v: [batch_size, k_seq_len, num_heads, head_dim]
+            freqs_cis: optional RoPE freqs applied to q and k.
+            k_lens: optional [batch_size] int tensor of real K/V lengths
+                per sample. When set, builds a key-padding mask so the
+                attention backend ignores garbage past each sample's
+                real length. Used by cross-attn paths where the text
+                encoder pads to a common max length but only the first
+                ``k_lens[b]`` positions are real.
         """
-        # Check input shapes
         assert q.dim() == 4 and k.dim() == 4 and v.dim() == 4, "Expected 4D tensors"
 
         forward_context: ForwardContext = get_forward_context()
         ctx_attn_metadata = forward_context.attn_metadata
+
+        if k_lens is not None:
+            # Build [B, k_seq_len] bool mask: True = real position. Both
+            # FA and SDPA backends already dispatch their masked paths
+            # off ``attn_metadata.attn_mask`` (FA: flash_attn_varlen_qk_no_pad
+            # when q/k lengths differ; SDPA: native attn_mask kwarg).
+            # We don't mutate the shared forward_context — a fresh
+            # dataclass via ``replace`` keeps self-attn calls in
+            # surrounding blocks unaffected.
+            B, max_k = k.shape[0], k.shape[1]
+            attn_mask = (torch.arange(max_k, device=k.device).unsqueeze(0)
+                         < k_lens.to(device=k.device,
+                                      dtype=torch.long).unsqueeze(1))
+            if ctx_attn_metadata is None:
+                raise RuntimeError(
+                    "LocalAttention.forward got k_lens but the forward_context "
+                    "has no attn_metadata to clone — caller must wrap the DiT "
+                    "forward in set_forward_context(...) with a built metadata.")
+            ctx_attn_metadata = dataclasses.replace(ctx_attn_metadata,
+                                                    attn_mask=attn_mask)
 
         if freqs_cis is not None:
             cos, sin = freqs_cis

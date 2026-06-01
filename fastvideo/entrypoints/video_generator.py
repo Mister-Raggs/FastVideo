@@ -94,6 +94,7 @@ _FROM_PRETRAINED_CONVENIENCE_KWARGS = frozenset({
     "pin_cpu_memory",
     "enable_torch_compile",
     "torch_compile_kwargs",
+    "use_var_len_cross_attn",
     "output_type",
     "nvfp4_fa4",
 })

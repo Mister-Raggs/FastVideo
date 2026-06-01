@@ -153,6 +153,19 @@ class FastVideoArgs:
 
     disable_autocast: bool = False
 
+    # When True, Wan cross-attention is masked by per-sample text length
+    # (derived from ``encoder_attention_mask``) so attention ignores T5
+    # padding positions. The mask flows from text_encoding through
+    # DenoisingStage into Wan DiT forward as ``encoder_attention_mask``,
+    # then into LocalAttention as ``k_lens``, which dispatches to the FA
+    # backend's varlen path. Output is NOT bit-equivalent to the default
+    # (unmasked) path — cross-attn weights are no longer diluted by
+    # padding-position softmax mass. The implementation reuses the FA
+    # backend's existing ``flash_attn_varlen_qk_no_pad`` dispatch, so no
+    # new kernel calls. Default OFF; ship as opt-in until per-model SSIM
+    # regression is validated.
+    use_var_len_cross_attn: bool = False
+
     # VSA parameters
     VSA_sparsity: float = 0.0  # inference/validation sparsity
 
@@ -537,6 +550,16 @@ class FastVideoArgs:
             default=FastVideoArgs.enable_torch_compile,
             help="Use torch.compile to speed up DiT inference." +
             "However, will likely cause precision drifts. See (https://github.com/pytorch/pytorch/issues/145213)",
+        )
+        parser.add_argument(
+            "--use-var-len-cross-attn",
+            action=StoreBoolean,
+            default=FastVideoArgs.use_var_len_cross_attn,
+            help="Mask Wan cross-attention by per-sample text length so "
+            "T5 padding positions are ignored. Reuses the FA backend's "
+            "existing varlen path via attn_metadata.attn_mask. NOT "
+            "bit-equivalent to the default unmasked path — corrects "
+            "softmax dilution from padding. Default OFF.",
         )
         parser.add_argument(
             "--torch-compile-kwargs",

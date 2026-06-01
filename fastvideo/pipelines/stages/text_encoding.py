@@ -72,9 +72,15 @@ class TextEncodingStage(PipelineStage):
 
         for pe in prompt_embeds_list:
             batch.prompt_embeds.append(pe)
-        if batch.prompt_attention_mask is not None:
-            for am in prompt_masks_list:
-                batch.prompt_attention_mask.append(am)
+        # Auto-init mask containers so encoder masks are preserved on the
+        # batch by default. The DenoisingStage forwards these to the DiT
+        # as ``encoder_attention_mask`` for cross-attn varlen masking; when
+        # the field is left as ``None`` here, the mask is silently dropped
+        # and cross-attn falls back to attending over padded positions.
+        if batch.prompt_attention_mask is None:
+            batch.prompt_attention_mask = []
+        for am in prompt_masks_list:
+            batch.prompt_attention_mask.append(am)
 
         # Encode negative prompt if CFG is enabled
         if batch.do_classifier_free_guidance:
@@ -91,9 +97,10 @@ class TextEncodingStage(PipelineStage):
             assert batch.negative_prompt_embeds is not None
             for ne in neg_embeds_list:
                 batch.negative_prompt_embeds.append(ne)
-            if batch.negative_attention_mask is not None:
-                for nm in neg_masks_list:
-                    batch.negative_attention_mask.append(nm)
+            if batch.negative_attention_mask is None:
+                batch.negative_attention_mask = []
+            for nm in neg_masks_list:
+                batch.negative_attention_mask.append(nm)
 
         return batch
 

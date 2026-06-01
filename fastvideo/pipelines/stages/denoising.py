@@ -127,6 +127,18 @@ class DenoisingStage(PipelineStage):
             },
         )
 
+        # Gate var-len cross-attn supply: Wan's DiT forward respects
+        # ``encoder_attention_mask`` if given. Other models (LongCat, etc.)
+        # use the mask differently and were already receiving it; this
+        # gate only drops Wan/Cosmos to preserve their legacy behaviour
+        # when the user hasn't opted in.
+        _var_len_dits = {"WanVideoConfig", "CosmosVideoConfig", "Cosmos25VideoConfig"}
+        _dit_mro_names = {
+            cls.__name__ for cls in type(fastvideo_args.pipeline_config.dit_config).__mro__
+        }
+        _gate_var_len = (bool(_var_len_dits & _dit_mro_names)
+                         and not fastvideo_args.use_var_len_cross_attn)
+
         pos_cond_kwargs = self.prepare_extra_func_kwargs(
             self.transformer.forward,
             {
@@ -134,6 +146,8 @@ class DenoisingStage(PipelineStage):
                 "encoder_attention_mask": batch.prompt_attention_mask,
             },
         )
+        if _gate_var_len:
+            pos_cond_kwargs.pop("encoder_attention_mask", None)
 
         neg_cond_kwargs = self.prepare_extra_func_kwargs(
             self.transformer.forward,
@@ -142,6 +156,8 @@ class DenoisingStage(PipelineStage):
                 "encoder_attention_mask": batch.negative_attention_mask,
             },
         )
+        if _gate_var_len:
+            neg_cond_kwargs.pop("encoder_attention_mask", None)
 
         action_kwargs = self.prepare_extra_func_kwargs(
             self.transformer.forward,

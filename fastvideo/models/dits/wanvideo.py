@@ -154,7 +154,8 @@ class WanT2VCrossAttention(WanSelfAttention):
         Args:
             x(Tensor): Shape [B, L1, C]
             context(Tensor): Shape [B, L2, C]
-            context_lens(Tensor): Shape [B]
+            context_lens(Tensor | None): Shape [B]. When set, attention
+                ignores K/V positions past each sample's real length.
         """
         b, n, d = x.size(0), self.num_heads, self.head_dim
 
@@ -176,7 +177,8 @@ class WanT2VCrossAttention(WanSelfAttention):
             v = self.to_v(context)[0].view(b, -1, n, d)
 
         # compute attention
-        x = self.attn(q, k, v) if k.size(1) > 0 else torch.zeros_like(q)
+        x = self.attn(q, k, v, k_lens=context_lens) if k.size(
+            1) > 0 else torch.zeros_like(q)
 
         # output
         x = x.flatten(2)
@@ -208,8 +210,12 @@ class WanI2VCrossAttention(WanSelfAttention):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
-            context(Tensor): Shape [B, L2, C]
-            context_lens(Tensor): Shape [B]
+            context(Tensor): Shape [B, L2, C]. First 257 tokens are CLIP
+                image features (fixed length); the rest is text context.
+            context_lens(Tensor | None): Shape [B]. Real length of the
+                TEXT portion (after the 257 image tokens). Applied only
+                to the text-context attention call; image-context
+                attention always sees a fixed 257-length sequence.
         """
         context_img = context[:, :257]
         context = context[:, 257:]
@@ -224,7 +230,8 @@ class WanI2VCrossAttention(WanSelfAttention):
         v_img = self.add_v_proj(context_img)[0].view(b, -1, n, d)
         img_x = self.attn(q, k_img, v_img)
         # compute attention
-        x = self.attn(q, k, v) if k.size(1) > 0 else torch.zeros_like(q)
+        x = self.attn(q, k, v, k_lens=context_lens) if k.size(
+            1) > 0 else torch.zeros_like(q)
 
         # output
         x = x.flatten(2)
@@ -318,6 +325,7 @@ class WanTransformerBlock(nn.Module):
         temb: torch.Tensor,
         freqs_cis: tuple[torch.Tensor, torch.Tensor],
         original_seq_len: int,
+        context_lens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.squeeze(1)
@@ -380,7 +388,7 @@ class WanTransformerBlock(nn.Module):
         # 2. Cross-attention
         attn_output = self.attn2(norm_hidden_states,
                                  context=encoder_hidden_states,
-                                 context_lens=None)
+                                 context_lens=context_lens)
         norm_hidden_states, hidden_states = self.cross_attn_residual_norm(
             hidden_states, attn_output, 1, c_shift_msa, c_scale_msa)
         norm_hidden_states, hidden_states = norm_hidden_states.to(
@@ -479,6 +487,7 @@ class WanTransformerBlock_VSA(nn.Module):
         temb: torch.Tensor,
         freqs_cis: tuple[torch.Tensor, torch.Tensor],
         original_seq_len: int,
+        context_lens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.squeeze(1)
@@ -530,7 +539,7 @@ class WanTransformerBlock_VSA(nn.Module):
         # 2. Cross-attention
         attn_output = self.attn2(norm_hidden_states,
                                  context=encoder_hidden_states,
-                                 context_lens=None)
+                                 context_lens=context_lens)
         norm_hidden_states, hidden_states = self.cross_attn_residual_norm(
             hidden_states, attn_output, 1, c_shift_msa, c_scale_msa)
         norm_hidden_states, hidden_states = norm_hidden_states.to(
@@ -619,6 +628,8 @@ class WanTransformer3DModel(BaseDiT):
                 timestep: torch.LongTensor,
                 encoder_hidden_states_image: torch.Tensor | list[torch.Tensor]
                 | None = None,
+                encoder_attention_mask: torch.Tensor | list[torch.Tensor]
+                | None = None,
                 guidance=None,
                 **kwargs) -> torch.Tensor:
         orig_dtype = hidden_states.dtype
@@ -629,6 +640,22 @@ class WanTransformer3DModel(BaseDiT):
             encoder_hidden_states_image = encoder_hidden_states_image[0]
         else:
             encoder_hidden_states_image = None
+
+        # Derive per-sample real T5 lengths from the encoder attention mask
+        # so cross-attention can ignore padded positions. The gate lives at
+        # the DenoisingStage supply point — when the user opts out of
+        # var-len cross-attn the mask is dropped before reaching this
+        # forward, so ``encoder_attention_mask is None`` here and the legacy
+        # unmasked behaviour is preserved. Promoting this to an explicit
+        # parameter (not ``**kwargs``) is required because
+        # DenoisingStage.prepare_extra_func_kwargs filters by explicit
+        # signature names.
+        context_lens: torch.Tensor | None = None
+        if encoder_attention_mask is not None:
+            if isinstance(encoder_attention_mask, (list, tuple)):
+                encoder_attention_mask = encoder_attention_mask[0]
+            context_lens = encoder_attention_mask.to(
+                dtype=torch.long).sum(dim=-1)
 
         batch_size, num_channels, num_frames, height, width = hidden_states.shape
         p_t, p_h, p_w = self.patch_size
@@ -696,11 +723,12 @@ class WanTransformer3DModel(BaseDiT):
             for block in self.blocks:
                 hidden_states = self._gradient_checkpointing_func(
                     block, hidden_states, encoder_hidden_states,
-                    timestep_proj, freqs_cis, original_seq_len)
+                    timestep_proj, freqs_cis, original_seq_len, context_lens)
         else:
             for block in self.blocks:
                 hidden_states = block(hidden_states, encoder_hidden_states,
-                                      timestep_proj, freqs_cis, original_seq_len)
+                                      timestep_proj, freqs_cis,
+                                      original_seq_len, context_lens=context_lens)
         # 5. Output norm, projection & unpatchify
         if temb.dim() == 3:
             # batch_size, seq_len, inner_dim (wan 2.2 ti2v)
