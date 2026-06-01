@@ -151,6 +151,20 @@ class FastVideoArgs:
     torch_compile_kwargs_vae: dict[str, Any] = field(default_factory=dict)
     torch_compile_kwargs_audio_vae: dict[str, Any] = field(default_factory=dict)
 
+    # DBCache (CacheDiT-style dual-block step caching). LOSSY: output is not
+    # bit-identical (SSIM<1.0), so this is opt-in and default OFF. When on, the
+    # first ``dbcache_fn_compute_blocks`` DiT blocks always run and produce an
+    # L1 "stable" residual; if its relative change from the previous step is
+    # below ``dbcache_residual_threshold`` the middle blocks are skipped and a
+    # cached residual is reused; the last ``dbcache_bn_compute_blocks`` blocks
+    # always run to refine. No caching during the first ``dbcache_max_warmup_
+    # steps`` steps. Currently wired for the Wan DiT only.
+    use_dbcache: bool = False
+    dbcache_fn_compute_blocks: int = 8
+    dbcache_bn_compute_blocks: int = 0
+    dbcache_residual_threshold: float = 0.08
+    dbcache_max_warmup_steps: int = 8
+
     disable_autocast: bool = False
 
     # VSA parameters
@@ -544,6 +558,43 @@ class FastVideoArgs:
             default=None,
             help=
             "JSON string of kwargs to pass to torch.compile. Example: '{\"backend\":\"inductor\",\"mode\":\"reduce-overhead\"}'",
+        )
+
+        parser.add_argument(
+            "--use-dbcache",
+            action=StoreBoolean,
+            default=FastVideoArgs.use_dbcache,
+            help="Enable CacheDiT-style DBCache step caching on the Wan DiT. "
+            "LOSSY (SSIM<1.0); default off.",
+        )
+        parser.add_argument(
+            "--dbcache-fn-compute-blocks",
+            type=int,
+            default=FastVideoArgs.dbcache_fn_compute_blocks,
+            help="DBCache: number of leading DiT blocks that always run and "
+            "produce the stable residual used for the skip decision.",
+        )
+        parser.add_argument(
+            "--dbcache-bn-compute-blocks",
+            type=int,
+            default=FastVideoArgs.dbcache_bn_compute_blocks,
+            help="DBCache: number of trailing DiT blocks that always run to "
+            "refine the (possibly cached) hidden states.",
+        )
+        parser.add_argument(
+            "--dbcache-residual-threshold",
+            type=float,
+            default=FastVideoArgs.dbcache_residual_threshold,
+            help="DBCache: relative L1 threshold on the Fn-block residual "
+            "below which the middle blocks are skipped. Higher = faster, "
+            "lower quality.",
+        )
+        parser.add_argument(
+            "--dbcache-max-warmup-steps",
+            type=int,
+            default=FastVideoArgs.dbcache_max_warmup_steps,
+            help="DBCache: number of initial denoise steps during which "
+            "caching is disabled (all blocks always run).",
         )
 
         parser.add_argument(

@@ -27,7 +27,8 @@ from fastvideo.logger import init_logger
 from fastvideo.models.dits.base import BaseDiT
 from fastvideo.platforms import AttentionBackendEnum, current_platform
 
-from fastvideo.distributed.parallel_state import get_sp_world_size
+from fastvideo.distributed.parallel_state import get_sp_group, get_sp_world_size
+from fastvideo.forward_context import get_forward_context
 
 logger = init_logger(__name__)
 
@@ -611,7 +612,110 @@ class WanTransformer3DModel(BaseDiT):
             torch.randn(1, 2, inner_dim) / inner_dim**0.5)
 
         self.gradient_checkpointing = False
+
+        # DBCache (CacheDiT-style step caching). Config is pushed from
+        # FastVideoArgs by the DenoisingStage before each generation; these are
+        # safe defaults so an un-configured eager call is bit-identical to main.
+        self.use_dbcache = False
+        self.dbcache_fn_compute_blocks = 8
+        self.dbcache_bn_compute_blocks = 0
+        self.dbcache_residual_threshold = 0.08
+        self.dbcache_max_warmup_steps = 8
+        # Per-generation cache state, keyed by within-step call index (slot 0 =
+        # first forward of a step, slot 1 = second, ... — separates the cond and
+        # uncond CFG passes, which are sequential forwards sharing a step index).
+        self._dbcache_state: dict[int, dict[str, torch.Tensor | None]] = {}
+        self._dbcache_last_step_idx: int | None = None
+        self._dbcache_call_in_step = 0
+
         self.__post_init__()
+
+    def reset_dbcache_state(self) -> None:
+        """Clear all cached residuals. Call once at the start of a generation."""
+        self._dbcache_state = {}
+        self._dbcache_last_step_idx = None
+        self._dbcache_call_in_step = 0
+
+    def _forward_blocks_dbcache(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        timestep_proj: torch.Tensor,
+        freqs_cis: tuple[torch.Tensor, torch.Tensor],
+        original_seq_len: int,
+    ) -> torch.Tensor:
+        """DBCache block loop: always run the first ``Fn`` and last ``Bn``
+        blocks; skip the middle span when the Fn-block residual barely changed
+        from the previous step (per CFG slot) and reuse a cached residual.
+
+        The skip decision is reduced across the sequence-parallel group so every
+        rank runs the identical set of blocks (otherwise the SP collectives
+        inside the blocks would desync)."""
+        ctx = get_forward_context()
+        step_idx = int(ctx.current_timestep) if ctx is not None else 0
+
+        # Detect a new denoise step (cond + uncond share the same step index) and
+        # reset the within-step call counter so cond/uncond map to stable slots.
+        if step_idx != self._dbcache_last_step_idx:
+            self._dbcache_last_step_idx = step_idx
+            self._dbcache_call_in_step = 0
+        else:
+            self._dbcache_call_in_step += 1
+        slot = self._dbcache_call_in_step
+        st = self._dbcache_state.setdefault(slot, {
+            "prev_r_fn": None,
+            "mid_residual": None
+        })
+
+        n = len(self.blocks)
+        fn = max(1, min(self.dbcache_fn_compute_blocks, n))
+        bn = max(0, min(self.dbcache_bn_compute_blocks, n - fn))
+        fn_blocks = self.blocks[:fn]
+        mid_blocks = self.blocks[fn:n - bn] if bn > 0 else self.blocks[fn:]
+        bn_blocks = self.blocks[n - bn:] if bn > 0 else []
+
+        # 1. Fn blocks always run; r_fn is the residual they contribute.
+        h_in = hidden_states
+        h = h_in
+        for block in fn_blocks:
+            h = block(h, encoder_hidden_states, timestep_proj, freqs_cis,
+                      original_seq_len)
+        r_fn = h - h_in
+        h_fn = h
+
+        # 2. Skip decision (lockstep across SP ranks).
+        in_warmup = step_idx < self.dbcache_max_warmup_steps
+        do_skip = False
+        if (not in_warmup and st["prev_r_fn"] is not None
+                and st["mid_residual"] is not None):
+            prev = st["prev_r_fn"]
+            num = (r_fn - prev).abs().sum().float()
+            den = prev.abs().sum().float()
+            if get_sp_world_size() > 1:
+                packed = torch.stack([num, den])
+                packed = get_sp_group().all_reduce(packed)
+                num, den = packed[0], packed[1]
+            diff = num / (den + 1e-8)
+            do_skip = bool(diff < self.dbcache_residual_threshold)
+
+        # 3. Middle blocks: skip + reuse cached residual, or run + cache it.
+        if do_skip:
+            h_mid = h_fn + st["mid_residual"]
+        else:
+            h = h_fn
+            for block in mid_blocks:
+                h = block(h, encoder_hidden_states, timestep_proj, freqs_cis,
+                          original_seq_len)
+            h_mid = h
+            st["mid_residual"] = h_mid - h_fn
+        st["prev_r_fn"] = r_fn
+
+        # 4. Bn blocks always run.
+        h = h_mid
+        for block in bn_blocks:
+            h = block(h, encoder_hidden_states, timestep_proj, freqs_cis,
+                      original_seq_len)
+        return h
 
     def forward(self,
                 hidden_states: torch.Tensor,
@@ -697,6 +801,10 @@ class WanTransformer3DModel(BaseDiT):
                 hidden_states = self._gradient_checkpointing_func(
                     block, hidden_states, encoder_hidden_states,
                     timestep_proj, freqs_cis, original_seq_len)
+        elif self.use_dbcache:
+            hidden_states = self._forward_blocks_dbcache(
+                hidden_states, encoder_hidden_states, timestep_proj, freqs_cis,
+                original_seq_len)
         else:
             for block in self.blocks:
                 hidden_states = block(hidden_states, encoder_hidden_states,

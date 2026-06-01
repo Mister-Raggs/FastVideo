@@ -273,6 +273,18 @@ class DenoisingStage(PipelineStage):
         _cfg_gate_reused_delta = 0
         _cfg_gate_invalidations = 0
 
+        # Push DBCache config onto the transformer(s) and clear any stale cache
+        # from a previous generation. No-op for DiTs that don't implement it.
+        for _tf in (self.transformer, self.transformer_2):
+            _model = getattr(_tf, "module", _tf)
+            if _model is not None and hasattr(_model, "reset_dbcache_state"):
+                _model.use_dbcache = fastvideo_args.use_dbcache
+                _model.dbcache_fn_compute_blocks = fastvideo_args.dbcache_fn_compute_blocks
+                _model.dbcache_bn_compute_blocks = fastvideo_args.dbcache_bn_compute_blocks
+                _model.dbcache_residual_threshold = fastvideo_args.dbcache_residual_threshold
+                _model.dbcache_max_warmup_steps = fastvideo_args.dbcache_max_warmup_steps
+                _model.reset_dbcache_state()
+
         # Run denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
