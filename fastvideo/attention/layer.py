@@ -255,6 +255,12 @@ class LocalAttention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
+        # Cached builder class for the k_lens masked path: when the caller
+        # supplies k_lens but the surrounding forward_context has no
+        # attn_metadata (e.g. denoising stages that pass ``attn_metadata=None``
+        # when the backend has no builder), we construct a minimal one
+        # here so the masked dispatch still fires.
+        self._attn_metadata_builder_cls = attn_backend.get_builder_cls()
 
     def forward(
         self,
@@ -292,17 +298,26 @@ class LocalAttention(nn.Module):
             # We don't mutate the shared forward_context — a fresh
             # dataclass via ``replace`` keeps self-attn calls in
             # surrounding blocks unaffected.
-            B, max_k = k.shape[0], k.shape[1]
+            max_k = k.shape[1]
             attn_mask = (torch.arange(max_k, device=k.device).unsqueeze(0)
                          < k_lens.to(device=k.device,
                                       dtype=torch.long).unsqueeze(1))
-            if ctx_attn_metadata is None:
+            if ctx_attn_metadata is not None:
+                ctx_attn_metadata = dataclasses.replace(ctx_attn_metadata,
+                                                        attn_mask=attn_mask)
+            elif self._attn_metadata_builder_cls is not None:
+                # No surrounding metadata (denoising path that passed
+                # ``attn_metadata=None`` because the resolved DenoisingStage
+                # backend has no builder, but the cross-attn-local backend
+                # we resolved at __init__ does). Construct one here.
+                current_timestep = getattr(forward_context, "current_timestep", 0)
+                ctx_attn_metadata = self._attn_metadata_builder_cls().build(
+                    current_timestep=current_timestep, attn_mask=attn_mask)
+            else:
                 raise RuntimeError(
-                    "LocalAttention.forward got k_lens but the forward_context "
-                    "has no attn_metadata to clone — caller must wrap the DiT "
-                    "forward in set_forward_context(...) with a built metadata.")
-            ctx_attn_metadata = dataclasses.replace(ctx_attn_metadata,
-                                                    attn_mask=attn_mask)
+                    "LocalAttention.forward got k_lens but cannot construct "
+                    "an attn_metadata: forward_context has no attn_metadata and "
+                    "the resolved backend has no builder class.")
 
         if freqs_cis is not None:
             cos, sin = freqs_cis
