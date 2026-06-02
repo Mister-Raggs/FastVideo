@@ -67,6 +67,57 @@ class DenoisingStage(PipelineStage):
                                           AttentionBackendEnum.TORCH_SDPA, AttentionBackendEnum.SAGE_ATTN_THREE)  # hack
         )
 
+    def _enable_or_refresh_cachedit(self, model, fastvideo_args,
+                                    num_inference_steps) -> None:
+        """Leg A: wire `model` into the cache-dit library via a transformer-only
+        BlockAdapter on first use, then refresh the cache context each
+        generation. Lazy-imports cache-dit so it stays an optional dependency.
+
+        Wan runs cond + uncond as separate forwards (enable_separate_cfg=True),
+        cond first (cfg_compute_first=False). num_inference_steps lets cache-dit
+        auto-refresh at the generation boundary; we also refresh_context
+        explicitly per generation so cache state never leaks across prompts.
+        """
+        import cache_dit
+        from cache_dit import (BlockAdapter, DBCacheConfig, ForwardPattern,
+                               TaylorSeerCalibratorConfig)
+
+        cache_config = DBCacheConfig(
+            Fn_compute_blocks=fastvideo_args.cachedit_fn_compute_blocks,
+            Bn_compute_blocks=fastvideo_args.cachedit_bn_compute_blocks,
+            residual_diff_threshold=fastvideo_args.cachedit_residual_threshold,
+            max_warmup_steps=fastvideo_args.cachedit_max_warmup_steps,
+            enable_separate_cfg=True,
+            cfg_compute_first=False,
+            num_inference_steps=num_inference_steps,
+        )
+        calibrator_config = None
+        if fastvideo_args.cachedit_taylorseer:
+            calibrator_config = TaylorSeerCalibratorConfig(
+                taylorseer_order=fastvideo_args.cachedit_taylorseer_order)
+
+        if not getattr(model, "_cachedit_enabled", False):
+            adapter = BlockAdapter(
+                transformer=model,
+                blocks=model.blocks,
+                forward_pattern=ForwardPattern.Pattern_2,
+                has_separate_cfg=True,
+                check_forward_pattern=False,
+            )
+            cache_dit.enable_cache(adapter, cache_config=cache_config,
+                                   calibrator_config=calibrator_config)
+            model._cachedit_enabled = True
+            logger.info(
+                "cache-dit enabled: Fn=%d Bn=%d threshold=%s warmup=%d "
+                "taylorseer=%s", fastvideo_args.cachedit_fn_compute_blocks,
+                fastvideo_args.cachedit_bn_compute_blocks,
+                fastvideo_args.cachedit_residual_threshold,
+                fastvideo_args.cachedit_max_warmup_steps,
+                fastvideo_args.cachedit_taylorseer)
+        else:
+            cache_dit.refresh_context(model,
+                                      num_inference_steps=num_inference_steps)
+
     def forward(
         self,
         batch: ForwardBatch,
@@ -666,57 +717,6 @@ class CosmosDenoisingStage(DenoisingStage):
 
     def __init__(self, transformer, scheduler, pipeline=None) -> None:
         super().__init__(transformer, scheduler, pipeline)
-
-    def _enable_or_refresh_cachedit(self, model, fastvideo_args,
-                                    num_inference_steps) -> None:
-        """Leg A: wire `model` into the cache-dit library via a transformer-only
-        BlockAdapter on first use, then refresh the cache context each
-        generation. Lazy-imports cache-dit so it stays an optional dependency.
-
-        Wan runs cond + uncond as separate forwards (enable_separate_cfg=True),
-        cond first (cfg_compute_first=False). num_inference_steps lets cache-dit
-        auto-refresh at the generation boundary; we also refresh_context
-        explicitly per generation so cache state never leaks across prompts.
-        """
-        import cache_dit
-        from cache_dit import (BlockAdapter, DBCacheConfig, ForwardPattern,
-                               TaylorSeerCalibratorConfig)
-
-        cache_config = DBCacheConfig(
-            Fn_compute_blocks=fastvideo_args.cachedit_fn_compute_blocks,
-            Bn_compute_blocks=fastvideo_args.cachedit_bn_compute_blocks,
-            residual_diff_threshold=fastvideo_args.cachedit_residual_threshold,
-            max_warmup_steps=fastvideo_args.cachedit_max_warmup_steps,
-            enable_separate_cfg=True,
-            cfg_compute_first=False,
-            num_inference_steps=num_inference_steps,
-        )
-        calibrator_config = None
-        if fastvideo_args.cachedit_taylorseer:
-            calibrator_config = TaylorSeerCalibratorConfig(
-                taylorseer_order=fastvideo_args.cachedit_taylorseer_order)
-
-        if not getattr(model, "_cachedit_enabled", False):
-            adapter = BlockAdapter(
-                transformer=model,
-                blocks=model.blocks,
-                forward_pattern=ForwardPattern.Pattern_2,
-                has_separate_cfg=True,
-                check_forward_pattern=False,
-            )
-            cache_dit.enable_cache(adapter, cache_config=cache_config,
-                                   calibrator_config=calibrator_config)
-            model._cachedit_enabled = True
-            logger.info(
-                "cache-dit enabled: Fn=%d Bn=%d threshold=%s warmup=%d "
-                "taylorseer=%s", fastvideo_args.cachedit_fn_compute_blocks,
-                fastvideo_args.cachedit_bn_compute_blocks,
-                fastvideo_args.cachedit_residual_threshold,
-                fastvideo_args.cachedit_max_warmup_steps,
-                fastvideo_args.cachedit_taylorseer)
-        else:
-            cache_dit.refresh_context(model,
-                                      num_inference_steps=num_inference_steps)
 
     def _run_transformer(
         self,
