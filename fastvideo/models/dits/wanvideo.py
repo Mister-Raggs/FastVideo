@@ -636,19 +636,36 @@ class WanTransformer3DModel(BaseDiT):
         post_patch_height = height // p_h
         post_patch_width = width // p_w
 
-        # Get rotary embeddings
-        d = self.hidden_size // self.num_attention_heads
-        rope_dim_list = [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)]
-        freqs_cos, freqs_sin = get_rotary_pos_embed(
-            (post_patch_num_frames, post_patch_height,
-             post_patch_width),
-            self.hidden_size,
-            self.num_attention_heads,
-            rope_dim_list,
-            dtype=torch.float32 if current_platform.is_mps() else torch.float64,
-            rope_theta=10000)
-        freqs_cis = (freqs_cos.to(hidden_states.device).float(),
-                     freqs_sin.to(hidden_states.device).float())
+        # Rotary embeddings depend only on the post-patch shape and the
+        # compute device — both constant across every step of a single
+        # generation. The original code rebuilt them on every forward via a
+        # float64 CPU compute + H2D copy (180+ times for a 50-step CFG run).
+        # Cache per (shape, device) tuple; cache miss only on the first
+        # forward of a new shape (or after a device change). Same pattern as
+        # matrixgame2 PR #1415 — different model, same recompute hotspot.
+        # Bit-exact with the original: math is identical, just memoized.
+        rope_cache = getattr(self, "_rope_cache", None)
+        if rope_cache is None:
+            rope_cache = {}
+            self._rope_cache = rope_cache
+        rope_key = (post_patch_num_frames, post_patch_height,
+                    post_patch_width, hidden_states.device)
+        if rope_key not in rope_cache:
+            d = self.hidden_size // self.num_attention_heads
+            rope_dim_list = [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)]
+            freqs_cos, freqs_sin = get_rotary_pos_embed(
+                (post_patch_num_frames, post_patch_height,
+                 post_patch_width),
+                self.hidden_size,
+                self.num_attention_heads,
+                rope_dim_list,
+                dtype=torch.float32 if current_platform.is_mps() else torch.float64,
+                rope_theta=10000)
+            rope_cache[rope_key] = (
+                freqs_cos.to(hidden_states.device).float(),
+                freqs_sin.to(hidden_states.device).float(),
+            )
+        freqs_cis = rope_cache[rope_key]
 
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
