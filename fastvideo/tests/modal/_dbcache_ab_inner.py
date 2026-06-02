@@ -66,6 +66,12 @@ def main() -> int:
 
     from fastvideo import VideoGenerator
 
+    # DBCache skips blocks, which is incompatible with layerwise/CPU
+    # offload (the offload prefetch chain assumes every block runs each
+    # step). Disable offload on BOTH passes so the A/B isolates the cache
+    # effect on equal footing. Wan 1.3B fits a single L40S (48GB) without
+    # offload; for 14B on smaller cards this is a real DBCache limitation
+    # (see W4 notes — would need offload-aware skip logic).
     generator = VideoGenerator.from_pretrained(
         model_id,
         num_gpus=num_gpus,
@@ -74,6 +80,8 @@ def main() -> int:
         dbcache_bn_compute_blocks=dbcache_bn_compute_blocks,
         dbcache_residual_threshold=dbcache_residual_threshold,
         dbcache_max_warmup_steps=dbcache_max_warmup_steps,
+        dit_layerwise_offload=False,
+        dit_cpu_offload=False,
         enable_torch_compile=enable_compile,
         dit_precision=dit_precision,
     )

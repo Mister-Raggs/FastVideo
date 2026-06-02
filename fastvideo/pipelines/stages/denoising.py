@@ -273,6 +273,20 @@ class DenoisingStage(PipelineStage):
         _cfg_gate_reused_delta = 0
         _cfg_gate_invalidations = 0
 
+        # DBCache skips transformer blocks, which is incompatible with
+        # layerwise / CPU offload: the offload hook prefetches each block's
+        # params on the prior block's forward and releases them on its own,
+        # assuming every block runs exactly once per step. A skipped block
+        # leaves its params prefetched-but-never-released, desyncing the chain
+        # (assert in layerwise_offload.prefetch_params). Fail loud with a fix.
+        if fastvideo_args.use_dbcache and (fastvideo_args.dit_layerwise_offload
+                                           or fastvideo_args.dit_cpu_offload):
+            raise ValueError(
+                "use_dbcache is incompatible with DiT offloading: DBCache skips "
+                "blocks, but the layerwise/CPU offload hook assumes every block "
+                "runs each step. Set dit_layerwise_offload=False and "
+                "dit_cpu_offload=False (the model must fit in GPU memory).")
+
         # Push DBCache config onto the transformer(s) and clear any stale cache
         # from a previous generation. No-op for DiTs that don't implement it.
         for _tf in (self.transformer, self.transformer_2):
