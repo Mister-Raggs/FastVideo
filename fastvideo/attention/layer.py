@@ -255,12 +255,6 @@ class LocalAttention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
-        # Cached builder class for the k_lens masked path: when the caller
-        # supplies k_lens but the surrounding forward_context has no
-        # attn_metadata (e.g. denoising stages that pass ``attn_metadata=None``
-        # when the backend has no builder), we construct a minimal one
-        # here so the masked dispatch still fires.
-        self._attn_metadata_builder_cls = attn_backend.get_builder_cls()
 
     def forward(
         self,
@@ -305,19 +299,31 @@ class LocalAttention(nn.Module):
             if ctx_attn_metadata is not None:
                 ctx_attn_metadata = dataclasses.replace(ctx_attn_metadata,
                                                         attn_mask=attn_mask)
-            elif self._attn_metadata_builder_cls is not None:
-                # No surrounding metadata (denoising path that passed
-                # ``attn_metadata=None`` because the resolved DenoisingStage
-                # backend has no builder, but the cross-attn-local backend
-                # we resolved at __init__ does). Construct one here.
-                current_timestep = getattr(forward_context, "current_timestep", 0)
-                ctx_attn_metadata = self._attn_metadata_builder_cls().build(
-                    current_timestep=current_timestep, attn_mask=attn_mask)
             else:
-                raise RuntimeError(
-                    "LocalAttention.forward got k_lens but cannot construct "
-                    "an attn_metadata: forward_context has no attn_metadata and "
-                    "the resolved backend has no builder class.")
+                # No surrounding metadata (denoising path passes
+                # ``attn_metadata=None`` whenever the stage-level resolved
+                # backend has no builder). The backend ABI nominally has
+                # ``get_builder_cls`` but both FlashAttention and SDPA
+                # inherit the base default that raises NotImplementedError
+                # — so we bypass the builder pattern and construct the
+                # metadata class directly off our resolved backend enum.
+                # Only the two backends LocalAttention supports for Wan
+                # cross-attn (FLASH_ATTN + TORCH_SDPA) need handling.
+                current_timestep = getattr(forward_context, "current_timestep", 0)
+                if self.backend == AttentionBackendEnum.FLASH_ATTN:
+                    from fastvideo.attention.backends.flash_attn import (
+                        FlashAttnMetadata)
+                    ctx_attn_metadata = FlashAttnMetadata(
+                        current_timestep=current_timestep, attn_mask=attn_mask)
+                elif self.backend == AttentionBackendEnum.TORCH_SDPA:
+                    from fastvideo.attention.backends.sdpa import SDPAMetadata
+                    ctx_attn_metadata = SDPAMetadata(
+                        current_timestep=current_timestep, attn_mask=attn_mask)
+                else:
+                    raise RuntimeError(
+                        "LocalAttention.forward got k_lens but cannot "
+                        f"construct minimal attn_metadata for backend "
+                        f"{self.backend}: add a dispatch branch here.")
 
         if freqs_cis is not None:
             cos, sin = freqs_cis
