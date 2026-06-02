@@ -165,6 +165,20 @@ class FastVideoArgs:
     dbcache_residual_threshold: float = 0.08
     dbcache_max_warmup_steps: int = 8
 
+    # Leg A: route caching through the real cache-dit library (vipshop/
+    # cache-dit) instead of the native port above. Same DBCache knobs, but
+    # adds an optional TaylorSeer calibrator that EXTRAPOLATES the cached
+    # residual (vs the native port's constant hold) — designed to reduce the
+    # high-detail artifacts the native scheme shows at aggressive settings.
+    # Requires `pip install cache-dit`. Mutually exclusive with use_dbcache.
+    use_cachedit: bool = False
+    cachedit_fn_compute_blocks: int = 8
+    cachedit_bn_compute_blocks: int = 0
+    cachedit_residual_threshold: float = 0.08
+    cachedit_max_warmup_steps: int = 8
+    cachedit_taylorseer: bool = False
+    cachedit_taylorseer_order: int = 1
+
     disable_autocast: bool = False
 
     # VSA parameters

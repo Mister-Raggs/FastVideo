@@ -49,6 +49,10 @@ def main() -> int:
     dbcache_bn_compute_blocks: int = cfg.get("dbcache_bn_compute_blocks", 0)
     dbcache_residual_threshold: float = cfg.get("dbcache_residual_threshold", 0.08)
     dbcache_max_warmup_steps: int = cfg.get("dbcache_max_warmup_steps", 8)
+    # Leg A: cache-dit library backend (mutually exclusive with use_dbcache).
+    use_cachedit: bool = cfg.get("use_cachedit", False)
+    cachedit_taylorseer: bool = cfg.get("cachedit_taylorseer", False)
+    cachedit_taylorseer_order: int = cfg.get("cachedit_taylorseer_order", 1)
     enable_compile: bool = cfg.get("enable_compile", False)
     dit_precision: str = cfg.get("dit_precision", "bf16")
     height: int = cfg["height"]
@@ -72,6 +76,8 @@ def main() -> int:
     # effect on equal footing. Wan 1.3B fits a single L40S (48GB) without
     # offload; for 14B on smaller cards this is a real DBCache limitation
     # (see W4 notes — would need offload-aware skip logic).
+    # Both backends share the DBCache knobs; the patched pass sets exactly one
+    # of use_dbcache (native port) / use_cachedit (cache-dit library) on.
     generator = VideoGenerator.from_pretrained(
         model_id,
         num_gpus=num_gpus,
@@ -80,6 +86,13 @@ def main() -> int:
         dbcache_bn_compute_blocks=dbcache_bn_compute_blocks,
         dbcache_residual_threshold=dbcache_residual_threshold,
         dbcache_max_warmup_steps=dbcache_max_warmup_steps,
+        use_cachedit=use_cachedit,
+        cachedit_fn_compute_blocks=dbcache_fn_compute_blocks,
+        cachedit_bn_compute_blocks=dbcache_bn_compute_blocks,
+        cachedit_residual_threshold=dbcache_residual_threshold,
+        cachedit_max_warmup_steps=dbcache_max_warmup_steps,
+        cachedit_taylorseer=cachedit_taylorseer,
+        cachedit_taylorseer_order=cachedit_taylorseer_order,
         dit_layerwise_offload=False,
         dit_cpu_offload=False,
         enable_torch_compile=enable_compile,
@@ -90,15 +103,19 @@ def main() -> int:
         print("[inner] enable_torch_compile=True — first prompt will include compile warmup", flush=True)
         print("[inner] NOTE: DBCache adds data-dependent control flow; expect graph breaks / "
               "recompiles under compile. Compare eager first.", flush=True)
-    resolved_flag = getattr(generator.fastvideo_args, "use_dbcache", None)
-    if resolved_flag is not use_dbcache:
-        raise RuntimeError(f"use_dbcache did not propagate: requested {use_dbcache}, "
-                           f"resolved {resolved_flag}")
+    for _name, _want in (("use_dbcache", use_dbcache), ("use_cachedit", use_cachedit)):
+        _got = getattr(generator.fastvideo_args, _name, None)
+        if _got is not _want:
+            raise RuntimeError(f"{_name} did not propagate: requested {_want}, resolved {_got}")
     if use_dbcache:
-        print(f"[inner] DBCache ON: Fn={dbcache_fn_compute_blocks} Bn={dbcache_bn_compute_blocks} "
+        print(f"[inner] native DBCache ON: Fn={dbcache_fn_compute_blocks} Bn={dbcache_bn_compute_blocks} "
               f"threshold={dbcache_residual_threshold} warmup={dbcache_max_warmup_steps}", flush=True)
+    elif use_cachedit:
+        print(f"[inner] cache-dit ON: Fn={dbcache_fn_compute_blocks} Bn={dbcache_bn_compute_blocks} "
+              f"threshold={dbcache_residual_threshold} warmup={dbcache_max_warmup_steps} "
+              f"taylorseer={cachedit_taylorseer}(order={cachedit_taylorseer_order})", flush=True)
     else:
-        print("[inner] DBCache OFF (baseline)", flush=True)
+        print("[inner] caching OFF (baseline)", flush=True)
 
     os.makedirs(output_dir, exist_ok=True)
     records = []

@@ -115,6 +115,7 @@ def _build_workspace_command(git_repo: str, git_ref: str, install_fa3: bool, ful
     install_block = f"""
 {fa3_step}
 uv pip install -e ".[test]"
+uv pip install cache-dit
 cd fastvideo-kernel && ./build.sh && cd ..
 export HF_HOME=/root/data/.cache
 hf auth login --token "$HF_TOKEN"
@@ -141,23 +142,32 @@ git submodule update --init --recursive
 """
 
 
-def _run_pass(*, use_dbcache: bool, model_id: str, num_gpus: int, height: int, width: int, num_frames: int,
-              num_inference_steps: int, output_dir: str, enable_compile: bool, dit_precision: str = "bf16",
-              num_prompts: int | None = None, dbcache_fn_compute_blocks: int = 8,
-              dbcache_bn_compute_blocks: int = 0, dbcache_residual_threshold: float = 0.08,
-              dbcache_max_warmup_steps: int = 8) -> list[dict]:
+def _run_pass(*, caching: bool, backend: str = "native", taylorseer: bool = False,
+              taylorseer_order: int = 1, model_id: str, num_gpus: int, height: int, width: int,
+              num_frames: int, num_inference_steps: int, output_dir: str, enable_compile: bool,
+              dit_precision: str = "bf16", num_prompts: int | None = None,
+              dbcache_fn_compute_blocks: int = 8, dbcache_bn_compute_blocks: int = 0,
+              dbcache_residual_threshold: float = 0.08, dbcache_max_warmup_steps: int = 8) -> list[dict]:
     """Invoke the inner pass script via /opt/venv/bin/python so FastVideo
     runs inside the image's venv (Modal's main process Python lacks torch).
-    """
+
+    ``caching`` False => baseline (both backends off). ``caching`` True =>
+    enable exactly one backend: native DBCache port (backend="native") or the
+    cache-dit library (backend="cachedit", optionally with TaylorSeer)."""
     import json
     import subprocess
     import tempfile
 
     selected_prompts = list(AB_PROMPTS) if num_prompts is None else list(AB_PROMPTS)[:num_prompts]
+    use_dbcache = caching and backend == "native"
+    use_cachedit = caching and backend == "cachedit"
     config = {
         "model_id": model_id,
         "num_gpus": num_gpus,
         "use_dbcache": use_dbcache,
+        "use_cachedit": use_cachedit,
+        "cachedit_taylorseer": taylorseer,
+        "cachedit_taylorseer_order": taylorseer_order,
         "dbcache_fn_compute_blocks": dbcache_fn_compute_blocks,
         "dbcache_bn_compute_blocks": dbcache_bn_compute_blocks,
         "dbcache_residual_threshold": dbcache_residual_threshold,
@@ -255,14 +265,18 @@ def run_ab(
     enable_compile: bool = False,
     dit_precision: str = "bf16",
     num_prompts: int = 0,
+    backend: str = "native",
+    taylorseer: bool = False,
+    taylorseer_order: int = 1,
     dbcache_fn: int = 8,
     dbcache_bn: int = 0,
     dbcache_threshold: float = 0.08,
     dbcache_warmup: int = 8,
 ):
-    """A/B: baseline (use_dbcache=False) vs patched (use_dbcache=True with
-    the given Fn/Bn/threshold/warmup). Both passes share container, model
-    load, seeds, and resolution — so the only variable is the cache."""
+    """A/B: baseline (caching off) vs patched (caching on with the given
+    Fn/Bn/threshold/warmup). ``backend`` selects native DBCache port vs the
+    cache-dit library (optionally +TaylorSeer). Both passes share container,
+    model load, seeds, and resolution — so the only variable is the cache."""
     import subprocess
 
     if model_preset not in MODEL_PRESETS:
@@ -295,20 +309,23 @@ def run_ab(
         num_prompts=(num_prompts if num_prompts > 0 else None),
     )
 
-    # Tag outputs by mode + cache config so sweeps don't clobber each other.
+    # Tag outputs by mode + backend + cache config so sweeps don't clobber.
     mode_tag = "compile" if enable_compile else "eager"
     if dit_precision != "bf16":
         mode_tag = f"{mode_tag}-{dit_precision}"
-    cfg_tag = f"f{dbcache_fn}b{dbcache_bn}t{str(dbcache_threshold).replace('.', 'p')}w{dbcache_warmup}"
+    backend_tag = backend + ("-ts%d" % taylorseer_order if (backend == "cachedit" and taylorseer) else "")
+    cfg_tag = f"{backend_tag}_f{dbcache_fn}b{dbcache_bn}t{str(dbcache_threshold).replace('.', 'p')}w{dbcache_warmup}"
+    # Baseline is backend-independent (caching off) — share it across backends.
     baseline_dir = f"/root/data/dbcache_out/{model_preset}/{mode_tag}/baseline"
     patched_dir = f"/root/data/dbcache_out/{model_preset}/{mode_tag}/{cfg_tag}"
 
-    cfg_label = (f"{model_preset} {mode_tag} | Fn={dbcache_fn} Bn={dbcache_bn} "
-                 f"threshold={dbcache_threshold} warmup={dbcache_warmup}")
-    print(f"\n--- baseline pass (use_dbcache=False, {mode_tag}) on {model_preset} ---")
-    baseline = _run_pass(use_dbcache=False, output_dir=baseline_dir, **common)
-    print(f"\n--- dbcache pass ({cfg_label}) ---")
-    patched = _run_pass(use_dbcache=True, output_dir=patched_dir,
+    cfg_label = (f"{model_preset} {mode_tag} | backend={backend_tag} Fn={dbcache_fn} "
+                 f"Bn={dbcache_bn} threshold={dbcache_threshold} warmup={dbcache_warmup}")
+    print(f"\n--- baseline pass (caching off, {mode_tag}) on {model_preset} ---")
+    baseline = _run_pass(caching=False, output_dir=baseline_dir, **common)
+    print(f"\n--- {backend} pass ({cfg_label}) ---")
+    patched = _run_pass(caching=True, backend=backend, taylorseer=taylorseer,
+                        taylorseer_order=taylorseer_order, output_dir=patched_dir,
                         dbcache_fn_compute_blocks=dbcache_fn, dbcache_bn_compute_blocks=dbcache_bn,
                         dbcache_residual_threshold=dbcache_threshold, dbcache_max_warmup_steps=dbcache_warmup,
                         **common)
@@ -328,6 +345,9 @@ def main(
     enable_compile: bool = False,
     dit_precision: str = "bf16",
     num_prompts: int = 0,
+    backend: str = "native",
+    taylorseer: bool = False,
+    taylorseer_order: int = 1,
     dbcache_fn: int = 8,
     dbcache_bn: int = 0,
     dbcache_threshold: float = 0.08,
@@ -338,8 +358,11 @@ def main(
     default. ``git_repo`` defaults to the ``fork`` remote (where the spike
     branch lives) and falls back to ``origin``.
 
-    Sweep the cache by re-invoking with different --dbcache-threshold /
-    --dbcache-fn / --dbcache-bn; each config tags its own output dir."""
+    ``--backend native`` (default) tests our native DBCache port; ``--backend
+    cachedit`` tests the cache-dit library, optionally with ``--taylorseer``
+    (residual extrapolation, targets the high-detail artifacts). Sweep by
+    re-invoking with different --dbcache-threshold / --dbcache-fn / --dbcache-bn;
+    each config + backend tags its own output dir."""
     import subprocess
 
     if model not in MODEL_PRESETS:
@@ -360,10 +383,13 @@ def main(
         if not git_repo:
             raise RuntimeError("Could not resolve git_repo. Pass --git-repo or configure a 'fork'/'origin' remote.")
 
+    if backend not in ("native", "cachedit"):
+        raise ValueError(f"backend must be 'native' or 'cachedit', got {backend!r}")
     # FA3 only on Hopper (capability 9.0); L40S is sm_89 -> baked FA2.
     install_fa3 = gpu.upper().startswith("H100") or gpu.upper().startswith("H200")
     print(f"GPU: {gpu}:{num_gpus}  model: {model}  ref: {git_ref}  install_fa3: {install_fa3}  "
           f"compile: {enable_compile}  precision: {dit_precision}  prompts: {num_prompts or 'all'}  "
+          f"backend: {backend}{' +taylorseer(o%d)' % taylorseer_order if taylorseer else ''}  "
           f"DBCache: Fn={dbcache_fn} Bn={dbcache_bn} threshold={dbcache_threshold} warmup={dbcache_warmup}  "
           f"repo: {git_repo}")
 
@@ -376,6 +402,9 @@ def main(
         enable_compile=enable_compile,
         dit_precision=dit_precision,
         num_prompts=num_prompts,
+        backend=backend,
+        taylorseer=taylorseer,
+        taylorseer_order=taylorseer_order,
         dbcache_fn=dbcache_fn,
         dbcache_bn=dbcache_bn,
         dbcache_threshold=dbcache_threshold,
