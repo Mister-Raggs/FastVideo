@@ -125,8 +125,26 @@ class TimestepEmbedder(nn.Module):
         self.freq_dtype = freq_dtype
 
     def forward(self, t: torch.Tensor, timestep_seq_len: int | None = None) -> torch.Tensor:
+        # The sinusoidal frequency table depends only on (frequency_embedding_size,
+        # max_period, freq_dtype) — all instance-constant — and the compute device.
+        # The original code rebuilt it on CPU (arange + exp) and copied it H2D on
+        # every forward (once per denoising step). Cache it per device on the module
+        # so the recompute + H2D happens once; only the timestep-dependent product
+        # (args = t * freqs) runs each call. Same cache-on-self pattern as the Wan
+        # rotary precompute and matrixgame2 PR #1415. Bit-exact: the cached tensor is
+        # the same value the prior path recomputed each call.
+        freqs_cache = getattr(self, "_freqs_cache", None)
+        if freqs_cache is None:
+            freqs_cache = {}
+            self._freqs_cache = freqs_cache
+        freqs = freqs_cache.get(t.device)
+        if freqs is None:
+            half = self.frequency_embedding_size // 2
+            freqs = torch.exp(-math.log(self.max_period) *
+                              torch.arange(start=0, end=half, dtype=self.freq_dtype) / half).to(device=t.device)
+            freqs_cache[t.device] = freqs
         t_freq = timestep_embedding(t, self.frequency_embedding_size, self.max_period,
-                                    dtype=self.freq_dtype).to(self.mlp.fc_in.weight.dtype)
+                                    dtype=self.freq_dtype, freqs=freqs).to(self.mlp.fc_in.weight.dtype)
         if timestep_seq_len is not None:
             t_freq = t_freq.unflatten(0, (1, timestep_seq_len))
         # t_freq = t_freq.to(self.mlp.fc_in.weight.dtype)
@@ -137,20 +155,27 @@ class TimestepEmbedder(nn.Module):
 def timestep_embedding(t: torch.Tensor,
                        dim: int,
                        max_period: int = 10000,
-                       dtype: torch.dtype = torch.float32) -> torch.Tensor:
+                       dtype: torch.dtype = torch.float32,
+                       freqs: torch.Tensor | None = None) -> torch.Tensor:
     """
     Create sinusoidal timestep embeddings.
-    
+
     Args:
         t: Tensor of shape [B] with timesteps
         dim: Embedding dimension
         max_period: Controls the minimum frequency of the embeddings
-        
+        freqs: Optional precomputed frequency table of shape [dim // 2]. When
+            provided, the per-call CPU compute + H2D copy is skipped (the caller
+            is responsible for caching it on the correct device). When None, the
+            table is built as before — preserving the original behavior for any
+            direct caller.
+
     Returns:
         Tensor of shape [B, dim] with embeddings
     """
     half = dim // 2
-    freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=dtype) / half).to(device=t.device)
+    if freqs is None:
+        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=dtype) / half).to(device=t.device)
     args = t[:, None].float() * freqs[None]
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     if dim % 2:
