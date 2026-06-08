@@ -69,6 +69,16 @@ MODEL_PRESETS = {
         "model_id": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
         "height": 720, "width": 1280, "num_frames": 49, "num_inference_steps": 30, "default_num_gpus": 2,
     },
+    # HunyuanVideo 1.0 (13B MMDiT: double+single blocks, embedded guidance ->
+    # single forward / separate_cfg=False). Reduced from the 720p/125f/50-step
+    # default to a tractable cache-dit operating point: 30 steps lets caching
+    # engage past the warmup, while 480p/45f keeps the no-offload 13B footprint
+    # within an L40S. cache-dit forbids DiT offload, so the DiT stays resident;
+    # the LLaMA text encoder still CPU-offloads.
+    "hunyuan-t2v": {
+        "model_id": "hunyuanvideo-community/HunyuanVideo",
+        "height": 480, "width": 848, "num_frames": 45, "num_inference_steps": 30, "default_num_gpus": 1,
+    },
 }
 
 
