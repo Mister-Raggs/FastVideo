@@ -134,8 +134,10 @@ class FastVideoArgs:
 
     # Step caching via cache-dit (https://github.com/vipshop/cache-dit).
     # LOSSY: skips DiT blocks on steps whose features barely change, so the
-    # output is NOT bit-identical (SSIM<1.0). Opt-in, default OFF, Wan DiT
-    # only for now. When on, the first ``cachedit_fn_compute_blocks`` blocks
+    # output is NOT bit-identical (SSIM<1.0). Opt-in, default OFF. Supported on
+    # Wan and HunyuanVideo; see _CACHEDIT_MODEL_SPECS in
+    # pipelines/stages/denoising.py. When on, the first
+    # ``cachedit_fn_compute_blocks`` blocks
     # always run and produce an L1 "stable" residual; if its relative change
     # from the previous step is below ``cachedit_residual_threshold`` the
     # middle blocks are skipped and a cached residual reused; the last
@@ -613,13 +615,13 @@ class FastVideoArgs:
             help="Disable autocast for denoising loop and vae decoding in pipeline sampling",
         )
 
-        # cache-dit step caching (lossy; Wan DiT). Requires `pip install
-        # cache-dit` and is incompatible with DiT offloading.
+        # cache-dit step caching (lossy; Wan, HunyuanVideo).
+        # Requires `pip install cache-dit` and is incompatible with DiT offloading.
         parser.add_argument(
             "--use-cachedit",
             action=StoreBoolean,
-            help="Enable cache-dit step caching for the Wan DiT (lossy; skips DiT blocks on steps whose features "
-            "barely change). Requires `pip install cache-dit`; incompatible with DiT offloading.",
+            help="Enable cache-dit step caching for supported DiTs (Wan, HunyuanVideo; lossy — skips DiT blocks on steps "
+            "whose features barely change). Requires `pip install cache-dit`; incompatible with DiT offloading.",
         )
         parser.add_argument(
             "--cachedit-fn-compute-blocks",

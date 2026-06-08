@@ -44,6 +44,49 @@ except ImportError:
 logger = init_logger(__name__)
 
 
+# Per-model cache-dit wiring. Keyed on the DiT class name (matched along the
+# MRO so subclasses inherit). Each entry describes how cache-dit attaches to
+# that model:
+#   blocks_attrs       attribute name(s) holding the transformer block
+#                      ModuleList(s): one name for single-stream DiTs, several
+#                      for dual-stream MMDiT models (e.g. double + single).
+#   forward_patterns   name(s) of the cache-dit ``ForwardPattern`` each block
+#                      list follows, aligned 1:1 with ``blocks_attrs`` and
+#                      resolved against the lazily-imported enum.
+# The CFG mode (separate cond/uncond forwards vs a single guidance-embedded
+# forward) is NOT in the spec — it is derived per generation from
+# ``batch.do_classifier_free_guidance`` so the same spec covers both a model's
+# CFG and embedded-guidance (distilled) configs.
+#
+# Patterns (see cache_dit ForwardPattern): Pattern_2 = (hidden, encoder)->hidden
+# (single-stream, e.g. Wan); Pattern_0 = (hidden, encoder)->(hidden, encoder)
+# (MMDiT double-stream); Pattern_3 = hidden->hidden (single-tensor stream, e.g.
+# HunyuanVideo's concatenated single blocks). FastVideo block signatures differ
+# from diffusers', so ``check_forward_pattern`` is disabled and patterns are
+# specified explicitly here.
+_CACHEDIT_MODEL_SPECS: dict[str, dict] = {
+    "WanTransformer3DModel": {
+        "blocks_attrs": ("blocks", ),
+        "forward_patterns": ("Pattern_2", ),
+    },
+    "HunyuanVideoTransformer3DModel": {
+        "blocks_attrs": ("double_blocks", "single_blocks"),
+        "forward_patterns": ("Pattern_0", "Pattern_3"),
+    },
+}
+
+
+def _resolve_cachedit_spec(model) -> dict | None:
+    """Return the cache-dit wiring spec for ``model``, or None if cache-dit has
+    no registered support for it. Matched along the MRO so model subclasses
+    (e.g. VSA / causal variants) inherit their base's spec."""
+    for klass in type(model).__mro__:
+        spec = _CACHEDIT_MODEL_SPECS.get(klass.__name__)
+        if spec is not None:
+            return spec
+    return None
+
+
 class DenoisingStage(PipelineStage):
     """
     Stage for running the denoising loop in diffusion pipelines.
@@ -68,18 +111,32 @@ class DenoisingStage(PipelineStage):
                                           AttentionBackendEnum.TORCH_SDPA, AttentionBackendEnum.SAGE_ATTN_THREE)  # hack
         )
 
-    def _enable_or_refresh_cachedit(self, model, fastvideo_args, num_inference_steps) -> None:
+    def _enable_or_refresh_cachedit(self, model, fastvideo_args, num_inference_steps,
+                                    has_separate_cfg) -> None:
         """Wire ``model`` into cache-dit via a transformer-only BlockAdapter on
         first use, then refresh the cache context each generation. cache-dit is
         lazy-imported so it stays an optional dependency.
 
-        Wan runs cond + uncond as separate forwards (``enable_separate_cfg=True``),
-        cond first (``cfg_compute_first=False``). ``num_inference_steps`` lets
-        cache-dit auto-refresh at the generation boundary; we also call
-        ``refresh_context`` explicitly per generation so cache state never leaks
-        across prompts (the bare-transformer path has no pipeline call to reset
-        it otherwise).
+        The model-specific wiring (block-list attribute(s), forward pattern(s))
+        comes from ``_CACHEDIT_MODEL_SPECS`` via ``_resolve_cachedit_spec``.
+        ``has_separate_cfg`` reflects whether this generation runs cond + uncond
+        as two forwards (classic CFG) vs a single guidance-embedded forward, and
+        is derived from the batch at the call site — so the same spec covers a
+        model's CFG and distilled/embedded-guidance configs. The denoising loop
+        computes cond before uncond (``cfg_compute_first=False``).
+        ``num_inference_steps`` lets cache-dit auto-refresh at the generation
+        boundary; we also call ``refresh_context`` explicitly per generation so
+        cache state never leaks across prompts (the bare-transformer path has no
+        pipeline call to reset it otherwise).
         """
+        spec = _resolve_cachedit_spec(model)
+        if spec is None:
+            # Should not happen — the call site only dispatches models with a
+            # spec — but guard so an unsupported model is skipped, not crashed.
+            logger.warning("cache-dit has no spec for %s; skipping (caching disabled for this model).",
+                           type(model).__name__)
+            return
+
         try:
             import cache_dit
             from cache_dit import (BlockAdapter, DBCacheConfig, ForwardPattern, TaylorSeerCalibratorConfig)
@@ -92,7 +149,7 @@ class DenoisingStage(PipelineStage):
             Bn_compute_blocks=fastvideo_args.cachedit_bn_compute_blocks,
             residual_diff_threshold=fastvideo_args.cachedit_residual_threshold,
             max_warmup_steps=fastvideo_args.cachedit_max_warmup_steps,
-            enable_separate_cfg=True,
+            enable_separate_cfg=has_separate_cfg,
             cfg_compute_first=False,
             num_inference_steps=num_inference_steps,
         )
@@ -101,16 +158,24 @@ class DenoisingStage(PipelineStage):
             calibrator_config = TaylorSeerCalibratorConfig(taylorseer_order=fastvideo_args.cachedit_taylorseer_order)
 
         if not getattr(model, "_cachedit_enabled", False):
+            blocks = [getattr(model, attr) for attr in spec["blocks_attrs"]]
+            patterns = [getattr(ForwardPattern, p) for p in spec["forward_patterns"]]
+            # BlockAdapter takes a single ModuleList + single pattern for
+            # single-stream models, and aligned lists for multi-stream MMDiT
+            # models (e.g. HunyuanVideo's double + single blocks); unwrap the
+            # common single-stream case.
+            single = len(blocks) == 1
             adapter = BlockAdapter(
                 transformer=model,
-                blocks=model.blocks,
-                forward_pattern=ForwardPattern.Pattern_2,
-                has_separate_cfg=True,
+                blocks=blocks[0] if single else blocks,
+                forward_pattern=patterns[0] if single else patterns,
+                has_separate_cfg=has_separate_cfg,
                 check_forward_pattern=False,
             )
             cache_dit.enable_cache(adapter, cache_config=cache_config, calibrator_config=calibrator_config)
             model._cachedit_enabled = True
-            logger.info("cache-dit enabled: Fn=%d Bn=%d threshold=%s warmup=%d taylorseer=%s",
+            logger.info("cache-dit enabled on %s: blocks=%s separate_cfg=%s Fn=%d Bn=%d threshold=%s warmup=%d "
+                        "taylorseer=%s", type(model).__name__, list(spec["blocks_attrs"]), has_separate_cfg,
                         fastvideo_args.cachedit_fn_compute_blocks, fastvideo_args.cachedit_bn_compute_blocks,
                         fastvideo_args.cachedit_residual_threshold, fastvideo_args.cachedit_max_warmup_steps,
                         fastvideo_args.cachedit_taylorseer)
@@ -414,8 +479,9 @@ class DenoisingStage(PipelineStage):
         if fastvideo_args.use_cachedit:
             for _tf in (self.transformer, self.transformer_2):
                 _model = getattr(_tf, "module", _tf)
-                if _model is not None and hasattr(_model, "blocks"):
-                    self._enable_or_refresh_cachedit(_model, fastvideo_args, num_inference_steps)
+                if _model is not None and _resolve_cachedit_spec(_model) is not None:
+                    self._enable_or_refresh_cachedit(_model, fastvideo_args, num_inference_steps,
+                                                     has_separate_cfg=batch.do_classifier_free_guidance)
 
         # Run denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
