@@ -73,6 +73,15 @@ _CACHEDIT_MODEL_SPECS: dict[str, dict] = {
         "blocks_attrs": ("double_blocks", "single_blocks"),
         "forward_patterns": ("Pattern_0", "Pattern_3"),
     },
+    # HunyuanVideo 1.5 — double-stream MMDiT only (no single_blocks). The
+    # ``refiner_blocks`` ModuleList is a text-embedding token refiner that runs
+    # once on the encoder states, NOT an iterated denoising block, so it is
+    # deliberately excluded from caching. MMDoubleStreamBlock.forward is
+    # (img, txt, ...) -> (img, txt) = Pattern_0.
+    "HunyuanVideo15Transformer3DModel": {
+        "blocks_attrs": ("double_blocks", ),
+        "forward_patterns": ("Pattern_0", ),
+    },
 }
 
 

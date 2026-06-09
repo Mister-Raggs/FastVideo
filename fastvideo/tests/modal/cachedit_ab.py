@@ -79,6 +79,15 @@ MODEL_PRESETS = {
         "model_id": "hunyuanvideo-community/HunyuanVideo",
         "height": 480, "width": 848, "num_frames": 45, "num_inference_steps": 30, "default_num_gpus": 1,
     },
+    # HunyuanVideo 1.5 480p T2V (double-stream MMDiT only, 54 double_blocks ->
+    # Pattern_0; refiner_blocks excluded). Non-distilled t2v variant (the i2v
+    # variants are step-distilled = bad cache targets). Reduced from native
+    # 480x848/121f/50steps to 45f/30steps so caching engages past warmup=8 and
+    # the no-offload footprint fits an L40S; fall back to H100 if OOM.
+    "hunyuan15-t2v": {
+        "model_id": "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v",
+        "height": 480, "width": 848, "num_frames": 45, "num_inference_steps": 30, "default_num_gpus": 1,
+    },
 }
 
 
