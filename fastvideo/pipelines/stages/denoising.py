@@ -501,6 +501,20 @@ class DenoisingStage(PipelineStage):
             for _tf in (self.transformer, self.transformer_2):
                 _model = getattr(_tf, "module", _tf)
                 if _model is not None and _resolve_cachedit_spec(_model) is not None:
+                    # Capture the ORIGINAL forward params pre-wrap so the kwarg
+                    # filter survives cache-dit replacing forward with a generic
+                    # (*args, **kwargs) wrapper. Store on BOTH the held object
+                    # (_tf, what prepare_extra_func_kwargs resolves via __self__)
+                    # and the unwrapped model.
+                    if not getattr(_model, "_cachedit_enabled", False):
+                        _params = set(inspect.signature(type(_model).forward).parameters)
+                        _tf._cachedit_orig_forward_params = _params
+                        _model._cachedit_orig_forward_params = _params
+                        logger.info(
+                            "[cachedit-diag] CAPTURE _tf=%s id=%s | _model=%s id=%s | same=%s | "
+                            "ehs_image_in_params=%s | params=%s", type(_tf).__name__, id(_tf),
+                            type(_model).__name__, id(_model), _tf is _model,
+                            "encoder_hidden_states_image" in _params, sorted(_params))
                     self._enable_or_refresh_cachedit(_model, fastvideo_args, num_inference_steps,
                                                      has_separate_cfg=batch.do_classifier_free_guidance)
 
@@ -814,8 +828,23 @@ class DenoisingStage(PipelineStage):
         # set lives on the module, reachable via the bound method's __self__.
         owner = getattr(func, "__self__", None)
         param_names = getattr(owner, "_cachedit_orig_forward_params", None) if owner is not None else None
+        used_override = param_names is not None
+        live_params = set(inspect.signature(func).parameters.keys())
         if param_names is None:
-            param_names = set(inspect.signature(func).parameters.keys())
+            param_names = live_params
+        # One-shot-ish diagnostic: log the first few times we filter a call that
+        # carries the HV15 required arg, to see the gen-1 (pre-wrap) -> gen-2
+        # (post-wrap) transition and whether the override connects. Remove once
+        # the HV15 cache-dit integration is settled.
+        if "encoder_hidden_states_image" in kwargs:
+            _n = getattr(self, "_cachedit_diag_count", 0)
+            if _n < 5:
+                self._cachedit_diag_count = _n + 1
+                logger.info(
+                    "[cachedit-diag #%d] PREPARE func=%s | owner=%s id=%s | override_found=%s | "
+                    "ehs_image_kept=%s | live_sig=%s", _n, getattr(func, "__qualname__", str(func)),
+                    type(owner).__name__ if owner is not None else None, id(owner) if owner is not None else None,
+                    used_override, "encoder_hidden_states_image" in param_names, sorted(live_params)[:8])
         extra_step_kwargs = {}
         for k, v in kwargs.items():
             if k in param_names:
