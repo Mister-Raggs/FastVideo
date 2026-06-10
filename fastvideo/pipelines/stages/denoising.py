@@ -167,6 +167,18 @@ class DenoisingStage(PipelineStage):
             calibrator_config = TaylorSeerCalibratorConfig(taylorseer_order=fastvideo_args.cachedit_taylorseer_order)
 
         if not getattr(model, "_cachedit_enabled", False):
+            # cache-dit replaces the transformer's forward with a generic
+            # (*args, **kwargs) wrapper that persists on the model. Our
+            # prepare_extra_func_kwargs filters model-specific kwargs by
+            # introspecting the LIVE forward signature — which after wrapping
+            # has no named params — so on every generation after this first
+            # one those kwargs (e.g. encoder_hidden_states_image) would be
+            # silently dropped. Capture the ORIGINAL forward param names now,
+            # pre-wrap, so the filter keeps passing them through. Models whose
+            # extra forward args are optional (Wan, HunyuanVideo) tolerated the
+            # drop via defaults; HunyuanVideo 1.5 has a REQUIRED
+            # encoder_hidden_states_image and crashed without this.
+            model._cachedit_orig_forward_params = set(inspect.signature(type(model).forward).parameters)
             blocks = [getattr(model, attr) for attr in spec["blocks_attrs"]]
             patterns = [getattr(ForwardPattern, p) for p in spec["forward_patterns"]]
             # BlockAdapter takes a single ModuleList + single pattern for
@@ -794,10 +806,16 @@ class DenoisingStage(PipelineStage):
         Returns:
             The prepared kwargs.
         """
+        # When cache-dit has wrapped a transformer's forward with a generic
+        # (*args, **kwargs) signature, introspecting the live signature would
+        # drop every model-specific kwarg. Prefer the original forward param
+        # names captured pre-wrap in _enable_or_refresh_cachedit, if present.
+        param_names = getattr(func, "_cachedit_orig_forward_params", None)
+        if param_names is None:
+            param_names = set(inspect.signature(func).parameters.keys())
         extra_step_kwargs = {}
         for k, v in kwargs.items():
-            accepts = k in set(inspect.signature(func).parameters.keys())
-            if accepts:
+            if k in param_names:
                 extra_step_kwargs[k] = v
         return extra_step_kwargs
 
