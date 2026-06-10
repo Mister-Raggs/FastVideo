@@ -810,7 +810,10 @@ class DenoisingStage(PipelineStage):
         # (*args, **kwargs) signature, introspecting the live signature would
         # drop every model-specific kwarg. Prefer the original forward param
         # names captured pre-wrap in _enable_or_refresh_cachedit, if present.
-        param_names = getattr(func, "_cachedit_orig_forward_params", None)
+        # ``func`` here is a bound method (e.g. ``model.forward``); the captured
+        # set lives on the module, reachable via the bound method's __self__.
+        owner = getattr(func, "__self__", None)
+        param_names = getattr(owner, "_cachedit_orig_forward_params", None) if owner is not None else None
         if param_names is None:
             param_names = set(inspect.signature(func).parameters.keys())
         extra_step_kwargs = {}
