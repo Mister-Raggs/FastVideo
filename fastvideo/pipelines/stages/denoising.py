@@ -167,18 +167,6 @@ class DenoisingStage(PipelineStage):
             calibrator_config = TaylorSeerCalibratorConfig(taylorseer_order=fastvideo_args.cachedit_taylorseer_order)
 
         if not getattr(model, "_cachedit_enabled", False):
-            # cache-dit replaces the transformer's forward with a generic
-            # (*args, **kwargs) wrapper that persists on the model. Our
-            # prepare_extra_func_kwargs filters model-specific kwargs by
-            # introspecting the LIVE forward signature — which after wrapping
-            # has no named params — so on every generation after this first
-            # one those kwargs (e.g. encoder_hidden_states_image) would be
-            # silently dropped. Capture the ORIGINAL forward param names now,
-            # pre-wrap, so the filter keeps passing them through. Models whose
-            # extra forward args are optional (Wan, HunyuanVideo) tolerated the
-            # drop via defaults; HunyuanVideo 1.5 has a REQUIRED
-            # encoder_hidden_states_image and crashed without this.
-            model._cachedit_orig_forward_params = set(inspect.signature(type(model).forward).parameters)
             blocks = [getattr(model, attr) for attr in spec["blocks_attrs"]]
             patterns = [getattr(ForwardPattern, p) for p in spec["forward_patterns"]]
             # BlockAdapter takes a single ModuleList + single pattern for
@@ -502,19 +490,14 @@ class DenoisingStage(PipelineStage):
                 _model = getattr(_tf, "module", _tf)
                 if _model is not None and _resolve_cachedit_spec(_model) is not None:
                     # Capture the ORIGINAL forward params pre-wrap so the kwarg
-                    # filter survives cache-dit replacing forward with a generic
-                    # (*args, **kwargs) wrapper. Store on BOTH the held object
-                    # (_tf, what prepare_extra_func_kwargs resolves via __self__)
-                    # and the unwrapped model.
+                    # filter (prepare_extra_func_kwargs) survives cache-dit
+                    # replacing forward with a generic (*args, **kwargs) wrapper.
+                    # Store on the held transformer ``_tf`` (what the filter
+                    # matches func against by identity) and the unwrapped model.
                     if not getattr(_model, "_cachedit_enabled", False):
                         _params = set(inspect.signature(type(_model).forward).parameters)
                         _tf._cachedit_orig_forward_params = _params
                         _model._cachedit_orig_forward_params = _params
-                        logger.info(
-                            "[cachedit-diag] CAPTURE _tf=%s id=%s | _model=%s id=%s | same=%s | "
-                            "ehs_image_in_params=%s | params=%s", type(_tf).__name__, id(_tf),
-                            type(_model).__name__, id(_model), _tf is _model,
-                            "encoder_hidden_states_image" in _params, sorted(_params))
                     self._enable_or_refresh_cachedit(_model, fastvideo_args, num_inference_steps,
                                                      has_separate_cfg=batch.do_classifier_free_guidance)
 
@@ -820,40 +803,23 @@ class DenoisingStage(PipelineStage):
         Returns:
             The prepared kwargs.
         """
-        # When cache-dit has wrapped a transformer's forward with a generic
-        # (*args, **kwargs) signature, introspecting the live signature would
-        # drop every model-specific kwarg. Prefer the original forward param
-        # names captured pre-wrap in _enable_or_refresh_cachedit, if present.
-        # ``func`` here is a bound method (e.g. ``model.forward``); the captured
-        # set lives on the module, reachable via the bound method's __self__.
-        # cache-dit replaces transformer.forward with a plain instance-attribute
-        # wrapper (not a bound method), so func.__self__ is None and the live
-        # signature is generic (*args, **kwargs) — which would drop every
-        # model-specific kwarg. Match func against the transformers we hold and
-        # use the param names captured pre-wrap in the cache-dit enable loop.
+        # cache-dit replaces a transformer's forward with a plain
+        # instance-attribute wrapper whose signature is generic
+        # (*args, **kwargs) — so introspecting the live signature here would
+        # drop every model-specific kwarg (fatal for a model with a REQUIRED
+        # extra forward arg, e.g. HunyuanVideo 1.5's encoder_hidden_states_image
+        # on the 2nd+ generation, once the wrap is in place). The wrapper is not
+        # a bound method (func.__self__ is None), so match func by identity
+        # against the transformers we hold and use the param names captured
+        # pre-wrap in the cache-dit enable loop.
         param_names = None
         for _tf in (self.transformer, getattr(self, "transformer_2", None)):
             if _tf is not None and getattr(_tf, "forward", None) is func:
                 param_names = getattr(_tf, "_cachedit_orig_forward_params", None)
                 if param_names is not None:
                     break
-        used_override = param_names is not None
-        live_params = set(inspect.signature(func).parameters.keys())
         if param_names is None:
-            param_names = live_params
-        # One-shot-ish diagnostic: log the first few times we filter a call that
-        # carries the HV15 required arg, to see the gen-1 (pre-wrap) -> gen-2
-        # (post-wrap) transition and whether the override connects. Remove once
-        # the HV15 cache-dit integration is settled.
-        if "encoder_hidden_states_image" in kwargs:
-            _n = getattr(self, "_cachedit_diag_count", 0)
-            if _n < 5:
-                self._cachedit_diag_count = _n + 1
-                logger.info(
-                    "[cachedit-diag #%d] PREPARE func=%s | owner=%s id=%s | override_found=%s | "
-                    "ehs_image_kept=%s | live_sig=%s", _n, getattr(func, "__qualname__", str(func)),
-                    type(owner).__name__ if owner is not None else None, id(owner) if owner is not None else None,
-                    used_override, "encoder_hidden_states_image" in param_names, sorted(live_params)[:8])
+            param_names = set(inspect.signature(func).parameters.keys())
         extra_step_kwargs = {}
         for k, v in kwargs.items():
             if k in param_names:
