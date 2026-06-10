@@ -826,8 +826,17 @@ class DenoisingStage(PipelineStage):
         # names captured pre-wrap in _enable_or_refresh_cachedit, if present.
         # ``func`` here is a bound method (e.g. ``model.forward``); the captured
         # set lives on the module, reachable via the bound method's __self__.
-        owner = getattr(func, "__self__", None)
-        param_names = getattr(owner, "_cachedit_orig_forward_params", None) if owner is not None else None
+        # cache-dit replaces transformer.forward with a plain instance-attribute
+        # wrapper (not a bound method), so func.__self__ is None and the live
+        # signature is generic (*args, **kwargs) — which would drop every
+        # model-specific kwarg. Match func against the transformers we hold and
+        # use the param names captured pre-wrap in the cache-dit enable loop.
+        param_names = None
+        for _tf in (self.transformer, getattr(self, "transformer_2", None)):
+            if _tf is not None and getattr(_tf, "forward", None) is func:
+                param_names = getattr(_tf, "_cachedit_orig_forward_params", None)
+                if param_names is not None:
+                    break
         used_override = param_names is not None
         live_params = set(inspect.signature(func).parameters.keys())
         if param_names is None:
