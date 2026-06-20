@@ -97,6 +97,12 @@ class SamplingParam:
     # TeaCache parameters
     enable_teacache: bool = False
 
+    # EasyCache: model-agnostic, training-free runtime-adaptive step caching
+    # (arXiv:2507.02860). enable_easycache turns it on; easycache_thresh is the
+    # speed/quality knob (higher = more skipped steps = faster, lower fidelity).
+    enable_easycache: bool = False
+    easycache_thresh: float = 0.05
+
     # GEN3C camera control
     trajectory_type: str | None = None
     movement_distance: float | None = None

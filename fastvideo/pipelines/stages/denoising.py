@@ -342,6 +342,18 @@ class DenoisingStage(PipelineStage):
         _cfg_gate_reused_delta = 0
         _cfg_gate_invalidations = 0
 
+        # EasyCache: model-agnostic, training-free adaptive step caching
+        # (arXiv:2507.02860). Operates on the DiT's whole-forward residual, so it
+        # needs nothing model-specific. It supersedes the CFG-delta gate (both are
+        # step/uncond-skip optimizations); disabling the gate keeps cond+uncond
+        # freshly computed on every computed step so both residual caches stay valid.
+        _easycache = None
+        if getattr(batch, "enable_easycache", False):
+            from fastvideo.pipelines.easycache import EasyCache
+            _easycache = EasyCache(thresh=getattr(batch, "easycache_thresh", 0.05))
+            _easycache.start(len(timesteps))
+            _cfg_gate_step_idx = len(timesteps) + 1  # never gates
+
         # Run denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -436,6 +448,10 @@ class DenoisingStage(PipelineStage):
 
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
+                # EasyCache: decide once per step (on the cond input) whether the
+                # DiT forward can be skipped and the cached residual reused.
+                _ec_skip = (_easycache is not None and not _easycache.should_compute(latent_model_input, i))
+
                 # Predict noise residual
                 with torch.autocast(device_type="cuda", dtype=target_dtype, enabled=autocast_enabled):
                     if (vsa_available and self.attn_backend == VideoSparseAttentionBackend):
@@ -484,19 +500,22 @@ class DenoisingStage(PipelineStage):
                             forward_batch=batch,
                             # fastvideo_args=fastvideo_args
                     ):
-                        # Run transformer
-                        noise_pred = current_model(
-                            latent_model_input,
-                            prompt_embeds,
-                            t_expand,
-                            guidance=guidance_expand,
-                            **image_kwargs,
-                            **pos_cond_kwargs,
-                            **action_kwargs,
-                            **camera_kwargs,
-                            **timesteps_r_kwarg,
-                            **flux2_id_kwargs,
-                        )
+                        # Run transformer (or reuse the EasyCache cond residual)
+                        if _ec_skip:
+                            noise_pred = _easycache.reuse(latent_model_input, cond=True)
+                        else:
+                            noise_pred = current_model(
+                                latent_model_input,
+                                prompt_embeds,
+                                t_expand,
+                                guidance=guidance_expand,
+                                **image_kwargs,
+                                **pos_cond_kwargs,
+                                **action_kwargs,
+                                **camera_kwargs,
+                                **timesteps_r_kwarg,
+                                **flux2_id_kwargs,
+                            )
 
                     if batch.do_classifier_free_guidance:
                         # CFG gating: invalidate cached delta when the underlying
@@ -527,18 +546,21 @@ class DenoisingStage(PipelineStage):
                                     attn_metadata=attn_metadata,
                                     forward_batch=batch,
                             ):
-                                noise_pred_uncond = current_model(
-                                    latent_model_input,
-                                    neg_prompt_embeds,
-                                    t_expand,
-                                    guidance=guidance_expand,
-                                    **image_kwargs,
-                                    **neg_cond_kwargs,
-                                    **action_kwargs,
-                                    **camera_kwargs,
-                                    **timesteps_r_kwarg,
-                                    **flux2_id_kwargs,
-                                )
+                                if _ec_skip:
+                                    noise_pred_uncond = _easycache.reuse(latent_model_input, cond=False)
+                                else:
+                                    noise_pred_uncond = current_model(
+                                        latent_model_input,
+                                        neg_prompt_embeds,
+                                        t_expand,
+                                        guidance=guidance_expand,
+                                        **image_kwargs,
+                                        **neg_cond_kwargs,
+                                        **action_kwargs,
+                                        **camera_kwargs,
+                                        **timesteps_r_kwarg,
+                                        **flux2_id_kwargs,
+                                    )
                             _cfg_gate_fresh_uncond += 1
 
                             # Refresh cache only when gating is active; under the
@@ -561,6 +583,13 @@ class DenoisingStage(PipelineStage):
                                 noise_pred_text,
                                 guidance_rescale=batch.guidance_rescale,
                             )
+                # EasyCache: record a freshly computed step (refresh residual
+                # caches, re-learn the input->output sensitivity k).
+                if _easycache is not None and not _ec_skip:
+                    _ec_cond = noise_pred_text if batch.do_classifier_free_guidance else noise_pred
+                    _easycache.update(latent_model_input, _ec_cond,
+                                      noise_pred_uncond if batch.do_classifier_free_guidance else None)
+
                 if scheduler_fp32:
                     # Diffusers-style: fp32 Euler update outside autocast avoids BF16 drift.
                     latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]

@@ -181,6 +181,10 @@ class ForwardBatch:
     # TeaCache
     enable_teacache: bool = False
 
+    # EasyCache: model-agnostic adaptive step caching (arXiv:2507.02860)
+    enable_easycache: bool = False
+    easycache_thresh: float = 0.05
+
     # LTX-2 multi-modal CFG parameters
     ltx2_cfg_scale_video: float = 1.0
     ltx2_cfg_scale_audio: float = 1.0
