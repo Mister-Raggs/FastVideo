@@ -100,8 +100,10 @@ class SamplingParam:
     # EasyCache: model-agnostic, training-free runtime-adaptive step caching
     # (arXiv:2507.02860). enable_easycache turns it on; easycache_thresh is the
     # speed/quality knob (higher = more skipped steps = faster, lower fidelity).
+    # Default 0.015 measured on Wan2.1-1.3B: ~-28% wall at SSIM ~0.94; ~0.05
+    # reaches ~-60% at SSIM ~0.75. Best threshold is mildly model-dependent.
     enable_easycache: bool = False
-    easycache_thresh: float = 0.05
+    easycache_thresh: float = 0.015
     # Steps always computed at the start (anchor structure/k) and end (final
     # refinement); never skipped regardless of threshold.
     easycache_warmup: int = 1

@@ -56,7 +56,7 @@ class EasyCache:
             # ... combine into noise_pred as usual ...
     """
 
-    def __init__(self, thresh: float = 0.05, warmup_steps: int = 1, tail_steps: int = 1) -> None:
+    def __init__(self, thresh: float = 0.015, warmup_steps: int = 1, tail_steps: int = 1) -> None:
         self.thresh = float(thresh)
         self.warmup_steps = int(warmup_steps)
         self.tail_steps = int(tail_steps)

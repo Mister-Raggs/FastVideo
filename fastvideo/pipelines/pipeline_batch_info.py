@@ -183,7 +183,7 @@ class ForwardBatch:
 
     # EasyCache: model-agnostic adaptive step caching (arXiv:2507.02860)
     enable_easycache: bool = False
-    easycache_thresh: float = 0.05
+    easycache_thresh: float = 0.015
     easycache_warmup: int = 1
     easycache_tail: int = 1
 

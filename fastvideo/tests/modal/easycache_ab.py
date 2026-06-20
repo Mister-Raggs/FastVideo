@@ -47,7 +47,7 @@ image = (modal.Image.from_registry(image_tag, add_python="3.12").apt_install(
 ).run_commands(
     "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable",
     "echo 'source ~/.cargo/env' >> ~/.bashrc",
-).env({"PATH": "/root/.cargo/bin:$PATH"}))
+).env({"PATH": "/root/.cargo/bin:$PATH", "HF_HUB_ENABLE_HF_TRANSFER": "1"}))
 
 # Same five prompts as the prior Wan A/Bs so deltas compare directly.
 AB_PROMPTS = [
@@ -72,8 +72,10 @@ MODEL_PRESETS = {
         "height": 720, "width": 1280, "num_frames": 77, "num_inference_steps": 30, "default_num_gpus": 1,
     },
     "wan2_2-t2v-14b": {
+        # 480p keeps activations small; the A14B MoE (two resident experts) is
+        # weight-heavy, so run on 2x H100 (or 4x L40S) — offload is forced off.
         "model_id": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        "height": 720, "width": 1280, "num_frames": 49, "num_inference_steps": 30, "default_num_gpus": 2,
+        "height": 480, "width": 832, "num_frames": 49, "num_inference_steps": 30, "default_num_gpus": 2,
     },
     # Cross-family model-agnostic proof. Needs offload OFF (EasyCache skips whole
     # forwards), so run on H100 (won't fit an L40S without offload).
@@ -101,6 +103,7 @@ git checkout {shlex.quote(git_ref)}
 git submodule update --init --recursive
 {fa3_step}
 uv pip install -e ".[test]"
+uv pip install hf_transfer
 cd fastvideo-kernel && ./build.sh && cd ..
 export HF_HOME=/root/data/.cache
 hf auth login --token "$HF_TOKEN"
