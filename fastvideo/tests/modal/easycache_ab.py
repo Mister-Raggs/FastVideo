@@ -75,6 +75,12 @@ MODEL_PRESETS = {
         "model_id": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
         "height": 720, "width": 1280, "num_frames": 49, "num_inference_steps": 30, "default_num_gpus": 2,
     },
+    # Cross-family model-agnostic proof. Needs offload OFF (EasyCache skips whole
+    # forwards), so run on H100 (won't fit an L40S without offload).
+    "hunyuan-1.5-480p": {
+        "model_id": "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v",
+        "height": 480, "width": 832, "num_frames": 81, "num_inference_steps": 50, "default_num_gpus": 1,
+    },
 }
 
 
