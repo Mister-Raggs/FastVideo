@@ -102,6 +102,10 @@ class SamplingParam:
     # speed/quality knob (higher = more skipped steps = faster, lower fidelity).
     enable_easycache: bool = False
     easycache_thresh: float = 0.05
+    # Steps always computed at the start (anchor structure/k) and end (final
+    # refinement); never skipped regardless of threshold.
+    easycache_warmup: int = 1
+    easycache_tail: int = 1
 
     # GEN3C camera control
     trajectory_type: str | None = None

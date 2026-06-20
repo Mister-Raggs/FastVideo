@@ -350,7 +350,9 @@ class DenoisingStage(PipelineStage):
         _easycache = None
         if getattr(batch, "enable_easycache", False):
             from fastvideo.pipelines.easycache import EasyCache
-            _easycache = EasyCache(thresh=getattr(batch, "easycache_thresh", 0.05))
+            _easycache = EasyCache(thresh=getattr(batch, "easycache_thresh", 0.05),
+                                   warmup_steps=getattr(batch, "easycache_warmup", 1),
+                                   tail_steps=getattr(batch, "easycache_tail", 1))
             _easycache.start(len(timesteps))
             _cfg_gate_step_idx = len(timesteps) + 1  # never gates
 

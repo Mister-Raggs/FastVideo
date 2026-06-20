@@ -102,7 +102,7 @@ hf auth login --token "$HF_TOKEN"
 
 
 def _run_pass(*, enable_easycache: bool, model_id: str, num_gpus: int, preset: dict, output_dir: str,
-              enable_compile: bool, num_prompts, thresh: float) -> list[dict]:
+              enable_compile: bool, num_prompts, thresh: float, warmup: int, tail: int) -> list[dict]:
     import json
     import subprocess
     import tempfile
@@ -110,7 +110,8 @@ def _run_pass(*, enable_easycache: bool, model_id: str, num_gpus: int, preset: d
     selected = list(AB_PROMPTS) if num_prompts is None else list(AB_PROMPTS)[:num_prompts]
     config = {
         "model_id": model_id, "num_gpus": num_gpus, "enable_easycache": enable_easycache,
-        "easycache_thresh": thresh, "enable_compile": enable_compile, "height": preset["height"],
+        "easycache_thresh": thresh, "easycache_warmup": warmup, "easycache_tail": tail,
+        "enable_compile": enable_compile, "height": preset["height"],
         "width": preset["width"], "num_frames": preset["num_frames"],
         "num_inference_steps": preset["num_inference_steps"], "output_dir": output_dir,
         "prompts": selected, "seed_base": AB_SEED,
@@ -185,7 +186,8 @@ def _print_table(rows: list[dict], label: str) -> None:
 
 @app.function(image=image, timeout=10800, volumes={"/root/data": model_vol}, secrets=[hf_secret], gpu="L40S:1")
 def run_ab(*, git_repo: str, git_ref: str, model_preset: str, num_gpus: int, install_fa3: bool = False,
-           enable_compile: bool = False, num_prompts: int = 0, thresh: float = 0.05):
+           enable_compile: bool = False, num_prompts: int = 0, thresh: float = 0.05, warmup: int = 1,
+           tail: int = 1):
     import subprocess
 
     if model_preset not in MODEL_PRESETS:
@@ -203,12 +205,12 @@ def run_ab(*, git_repo: str, git_ref: str, model_preset: str, num_gpus: int, ins
     os.chdir("/FastVideo")
 
     common = dict(model_id=preset["model_id"], num_gpus=num_gpus, preset=preset, enable_compile=enable_compile,
-                  num_prompts=(num_prompts if num_prompts > 0 else None), thresh=thresh)
+                  num_prompts=(num_prompts if num_prompts > 0 else None), thresh=thresh, warmup=warmup, tail=tail)
 
-    cfg_tag = f"easycache_t{str(thresh).replace('.', 'p')}"
+    cfg_tag = f"easycache_t{str(thresh).replace('.', 'p')}w{warmup}tl{tail}"
     baseline_dir = f"/root/data/easycache_out/{model_preset}/baseline"
     patched_dir = f"/root/data/easycache_out/{model_preset}/{cfg_tag}"
-    label = f"{model_preset} | thresh={thresh}"
+    label = f"{model_preset} | thresh={thresh} warmup={warmup} tail={tail}"
 
     print(f"\n--- baseline pass (caching off) on {model_preset} ---")
     baseline = _run_pass(enable_easycache=False, output_dir=baseline_dir, **common)
@@ -223,10 +225,11 @@ def run_ab(*, git_repo: str, git_ref: str, model_preset: str, num_gpus: int, ins
 @app.local_entrypoint()
 def main(gpu: str = "L40S", model: str = "wan2_1-t2v-1.3b", num_gpus: int = 0, git_repo: str = "",
          git_ref: str = "feat/easycache-adaptive-caching", enable_compile: bool = False, num_prompts: int = 0,
-         thresh: float = 0.05):
+         thresh: float = 0.05, warmup: int = 1, tail: int = 1):
     """Drive the EasyCache A/B from your laptop. Sweep ``--thresh`` (higher =
-    more aggressive / faster / lower quality). Run a different ``--model`` to
-    prove model-agnosticism. ``git_repo`` defaults to the ``fork`` remote."""
+    more aggressive / faster / lower quality) and ``--warmup`` / ``--tail``
+    (more = protect early/late steps = higher fidelity). Run a different
+    ``--model`` to prove model-agnosticism. ``git_repo`` defaults to ``fork``."""
     import subprocess
 
     if model not in MODEL_PRESETS:
@@ -246,9 +249,9 @@ def main(gpu: str = "L40S", model: str = "wan2_1-t2v-1.3b", num_gpus: int = 0, g
 
     install_fa3 = gpu.upper().startswith("H100") or gpu.upper().startswith("H200")
     print(f"GPU: {gpu}:{num_gpus}  model: {model}  ref: {git_ref}  install_fa3: {install_fa3}  "
-          f"compile: {enable_compile}  prompts: {num_prompts or 'all'}  easycache_thresh: {thresh}  "
-          f"repo: {git_repo}")
+          f"compile: {enable_compile}  prompts: {num_prompts or 'all'}  "
+          f"easycache: thresh={thresh} warmup={warmup} tail={tail}  repo: {git_repo}")
 
     run_ab.with_options(gpu=f"{gpu}:{num_gpus}").remote(
         git_repo=git_repo, git_ref=git_ref, model_preset=model, num_gpus=num_gpus, install_fa3=install_fa3,
-        enable_compile=enable_compile, num_prompts=num_prompts, thresh=thresh)
+        enable_compile=enable_compile, num_prompts=num_prompts, thresh=thresh, warmup=warmup, tail=tail)

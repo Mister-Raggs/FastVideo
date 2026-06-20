@@ -44,6 +44,8 @@ def main() -> int:
     num_gpus = cfg["num_gpus"]
     enable_easycache = cfg["enable_easycache"]
     thresh = cfg.get("easycache_thresh", 0.05)
+    warmup = cfg.get("easycache_warmup", 1)
+    tail = cfg.get("easycache_tail", 1)
     enable_compile = cfg.get("enable_compile", False)
     height, width = cfg["height"], cfg["width"]
     num_frames = cfg["num_frames"]
@@ -89,6 +91,8 @@ def main() -> int:
             seed=seed_base + i,
             enable_easycache=enable_easycache,
             easycache_thresh=thresh,
+            easycache_warmup=warmup,
+            easycache_tail=tail,
         )
         wall = time.perf_counter() - t0
         # generate_video appends _1, _2, ... rather than overwriting; pick the
