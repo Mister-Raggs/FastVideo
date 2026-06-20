@@ -627,6 +627,9 @@ class DenoisingStage(PipelineStage):
                 _cfg_gate_invalidations,
             )
 
+        if _is_rank0 and _easycache is not None:
+            logger.info(_easycache.summary())
+
         trajectory_tensor: torch.Tensor | None = None
         if trajectory_latents:
             trajectory_tensor = torch.stack(trajectory_latents, dim=1)
