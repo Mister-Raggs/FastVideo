@@ -44,6 +44,49 @@ except ImportError:
 logger = init_logger(__name__)
 
 
+# Per-model cache-dit wiring. Keyed on the DiT class name (matched along the
+# MRO so subclasses inherit). Each entry describes how cache-dit attaches to
+# that model:
+#   blocks_attrs       attribute name(s) holding the transformer block
+#                      ModuleList(s): one name for single-stream DiTs, several
+#                      for dual-stream MMDiT models (e.g. double + single).
+#   forward_patterns   name(s) of the cache-dit ``ForwardPattern`` each block
+#                      list follows, aligned 1:1 with ``blocks_attrs`` and
+#                      resolved against the lazily-imported enum.
+# The CFG mode (separate cond/uncond forwards vs a single guidance-embedded
+# forward) is NOT in the spec — it is derived per generation from
+# ``batch.do_classifier_free_guidance`` so the same spec covers both a model's
+# CFG and embedded-guidance (distilled) configs.
+#
+# Patterns (see cache_dit ForwardPattern): Pattern_2 = (hidden, encoder)->hidden
+# (single-stream, e.g. Wan); Pattern_0 = (hidden, encoder)->(hidden, encoder)
+# (MMDiT double-stream); Pattern_3 = hidden->hidden (single-tensor stream, e.g.
+# HunyuanVideo's concatenated single blocks). FastVideo block signatures differ
+# from diffusers', so ``check_forward_pattern`` is disabled and patterns are
+# specified explicitly here.
+_CACHEDIT_MODEL_SPECS: dict[str, dict] = {
+    "WanTransformer3DModel": {
+        "blocks_attrs": ("blocks", ),
+        "forward_patterns": ("Pattern_2", ),
+    },
+    "HunyuanVideoTransformer3DModel": {
+        "blocks_attrs": ("double_blocks", "single_blocks"),
+        "forward_patterns": ("Pattern_0", "Pattern_3"),
+    },
+}
+
+
+def _resolve_cachedit_spec(model) -> dict | None:
+    """Return the cache-dit wiring spec for ``model``, or None if cache-dit has
+    no registered support for it. Matched along the MRO so model subclasses
+    (e.g. VSA / causal variants) inherit their base's spec."""
+    for klass in type(model).__mro__:
+        spec = _CACHEDIT_MODEL_SPECS.get(klass.__name__)
+        if spec is not None:
+            return spec
+    return None
+
+
 class DenoisingStage(PipelineStage):
     """
     Stage for running the denoising loop in diffusion pipelines.
@@ -67,6 +110,77 @@ class DenoisingStage(PipelineStage):
                                           AttentionBackendEnum.VMOBA_ATTN, AttentionBackendEnum.FLASH_ATTN,
                                           AttentionBackendEnum.TORCH_SDPA, AttentionBackendEnum.SAGE_ATTN_THREE)  # hack
         )
+
+    def _enable_or_refresh_cachedit(self, model, fastvideo_args, num_inference_steps,
+                                    has_separate_cfg) -> None:
+        """Wire ``model`` into cache-dit via a transformer-only BlockAdapter on
+        first use, then refresh the cache context each generation. cache-dit is
+        lazy-imported so it stays an optional dependency.
+
+        The model-specific wiring (block-list attribute(s), forward pattern(s))
+        comes from ``_CACHEDIT_MODEL_SPECS`` via ``_resolve_cachedit_spec``.
+        ``has_separate_cfg`` reflects whether this generation runs cond + uncond
+        as two forwards (classic CFG) vs a single guidance-embedded forward, and
+        is derived from the batch at the call site — so the same spec covers a
+        model's CFG and distilled/embedded-guidance configs. The denoising loop
+        computes cond before uncond (``cfg_compute_first=False``).
+        ``num_inference_steps`` lets cache-dit auto-refresh at the generation
+        boundary; we also call ``refresh_context`` explicitly per generation so
+        cache state never leaks across prompts (the bare-transformer path has no
+        pipeline call to reset it otherwise).
+        """
+        spec = _resolve_cachedit_spec(model)
+        if spec is None:
+            # Should not happen — the call site only dispatches models with a
+            # spec — but guard so an unsupported model is skipped, not crashed.
+            logger.warning("cache-dit has no spec for %s; skipping (caching disabled for this model).",
+                           type(model).__name__)
+            return
+
+        try:
+            import cache_dit
+            from cache_dit import (BlockAdapter, DBCacheConfig, ForwardPattern, TaylorSeerCalibratorConfig)
+        except ImportError as e:
+            raise ImportError("use_cachedit requires the cache-dit package, which is not installed. Install it with "
+                              "`pip install \"fastvideo[cache]\"` (or `pip install cache-dit`).") from e
+
+        cache_config = DBCacheConfig(
+            Fn_compute_blocks=fastvideo_args.cachedit_fn_compute_blocks,
+            Bn_compute_blocks=fastvideo_args.cachedit_bn_compute_blocks,
+            residual_diff_threshold=fastvideo_args.cachedit_residual_threshold,
+            max_warmup_steps=fastvideo_args.cachedit_max_warmup_steps,
+            enable_separate_cfg=has_separate_cfg,
+            cfg_compute_first=False,
+            num_inference_steps=num_inference_steps,
+        )
+        calibrator_config = None
+        if fastvideo_args.cachedit_taylorseer:
+            calibrator_config = TaylorSeerCalibratorConfig(taylorseer_order=fastvideo_args.cachedit_taylorseer_order)
+
+        if not getattr(model, "_cachedit_enabled", False):
+            blocks = [getattr(model, attr) for attr in spec["blocks_attrs"]]
+            patterns = [getattr(ForwardPattern, p) for p in spec["forward_patterns"]]
+            # BlockAdapter takes a single ModuleList + single pattern for
+            # single-stream models, and aligned lists for multi-stream MMDiT
+            # models (e.g. HunyuanVideo's double + single blocks); unwrap the
+            # common single-stream case.
+            single = len(blocks) == 1
+            adapter = BlockAdapter(
+                transformer=model,
+                blocks=blocks[0] if single else blocks,
+                forward_pattern=patterns[0] if single else patterns,
+                has_separate_cfg=has_separate_cfg,
+                check_forward_pattern=False,
+            )
+            cache_dit.enable_cache(adapter, cache_config=cache_config, calibrator_config=calibrator_config)
+            model._cachedit_enabled = True
+            logger.info("cache-dit enabled on %s: blocks=%s separate_cfg=%s Fn=%d Bn=%d threshold=%s warmup=%d "
+                        "taylorseer=%s", type(model).__name__, list(spec["blocks_attrs"]), has_separate_cfg,
+                        fastvideo_args.cachedit_fn_compute_blocks, fastvideo_args.cachedit_bn_compute_blocks,
+                        fastvideo_args.cachedit_residual_threshold, fastvideo_args.cachedit_max_warmup_steps,
+                        fastvideo_args.cachedit_taylorseer)
+        else:
+            cache_dit.refresh_context(model, num_inference_steps=num_inference_steps)
 
     def forward(
         self,
@@ -347,6 +461,8 @@ class DenoisingStage(PipelineStage):
         # needs nothing model-specific. It supersedes the CFG-delta gate (both are
         # step/uncond-skip optimizations); disabling the gate keeps cond+uncond
         # freshly computed on every computed step so both residual caches stay valid.
+        # NOTE (comparison branch): EasyCache and cache-dit are mutually exclusive
+        # at runtime — the A/B harness enables exactly one per pass, never both.
         _easycache = None
         _easycache_model_id = None
         if getattr(batch, "enable_easycache", False):
@@ -356,6 +472,42 @@ class DenoisingStage(PipelineStage):
                                    tail_steps=getattr(batch, "easycache_tail", 1))
             _easycache.start(len(timesteps))
             _cfg_gate_step_idx = len(timesteps) + 1  # never gates
+
+        # cache-dit step caching skips DiT blocks, which is incompatible with
+        # layerwise / CPU offload: the offload hook prefetches each block's
+        # params on the prior block's forward and releases them on its own,
+        # assuming every block runs exactly once per step. A skipped block
+        # leaves its params prefetched-but-never-released, desyncing the chain.
+        if fastvideo_args.use_cachedit and (fastvideo_args.dit_layerwise_offload or fastvideo_args.dit_cpu_offload):
+            raise ValueError("use_cachedit is incompatible with DiT offloading: caching skips "
+                             "blocks, but the layerwise/CPU offload hook assumes every block "
+                             "runs each step. Set dit_layerwise_offload=False and "
+                             "dit_cpu_offload=False (the model must fit in GPU memory).")
+        # cache-dit skips blocks via data-dependent control flow (a per-step
+        # residual-diff decision), which torch.compile cannot trace without
+        # graph breaks/recompiles. Disallow the combination for now (eager
+        # only); compile support is a follow-up.
+        if fastvideo_args.use_cachedit and fastvideo_args.enable_torch_compile:
+            raise ValueError("use_cachedit is currently incompatible with enable_torch_compile: cache-dit "
+                             "introduces data-dependent control flow that torch.compile cannot trace cleanly. "
+                             "Set enable_torch_compile=False (eager); compile support is a follow-up.")
+        # Enable cache-dit on the transformer(s) once, then refresh the cache
+        # context each generation so state never leaks across prompts.
+        if fastvideo_args.use_cachedit:
+            for _tf in (self.transformer, self.transformer_2):
+                _model = getattr(_tf, "module", _tf)
+                if _model is not None and _resolve_cachedit_spec(_model) is not None:
+                    # Capture the ORIGINAL forward params pre-wrap so the kwarg
+                    # filter (prepare_extra_func_kwargs) survives cache-dit
+                    # replacing forward with a generic (*args, **kwargs) wrapper.
+                    # Store on the held transformer ``_tf`` (what the filter
+                    # matches func against by identity) and the unwrapped model.
+                    if not getattr(_model, "_cachedit_enabled", False):
+                        _params = set(inspect.signature(type(_model).forward).parameters)
+                        _tf._cachedit_orig_forward_params = _params
+                        _model._cachedit_orig_forward_params = _params
+                    self._enable_or_refresh_cachedit(_model, fastvideo_args, num_inference_steps,
+                                                     has_separate_cfg=batch.do_classifier_free_guidance)
 
         # Run denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
@@ -687,10 +839,26 @@ class DenoisingStage(PipelineStage):
         Returns:
             The prepared kwargs.
         """
+        # cache-dit replaces a transformer's forward with a plain
+        # instance-attribute wrapper whose signature is generic
+        # (*args, **kwargs) — so introspecting the live signature here would
+        # drop every model-specific kwarg (fatal for a model with a REQUIRED
+        # extra forward arg, e.g. HunyuanVideo 1.5's encoder_hidden_states_image
+        # on the 2nd+ generation, once the wrap is in place). The wrapper is not
+        # a bound method (func.__self__ is None), so match func by identity
+        # against the transformers we hold and use the param names captured
+        # pre-wrap in the cache-dit enable loop.
+        param_names = None
+        for _tf in (self.transformer, getattr(self, "transformer_2", None)):
+            if _tf is not None and getattr(_tf, "forward", None) is func:
+                param_names = getattr(_tf, "_cachedit_orig_forward_params", None)
+                if param_names is not None:
+                    break
+        if param_names is None:
+            param_names = set(inspect.signature(func).parameters.keys())
         extra_step_kwargs = {}
         for k, v in kwargs.items():
-            accepts = k in set(inspect.signature(func).parameters.keys())
-            if accepts:
+            if k in param_names:
                 extra_step_kwargs[k] = v
         return extra_step_kwargs
 
