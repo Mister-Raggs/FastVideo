@@ -221,7 +221,7 @@ def _print_report(model_preset: str, method_summaries: list[tuple[str, dict]]) -
 
 @app.function(image=image, timeout=14400, volumes={"/root/data": model_vol}, secrets=[hf_secret], gpu="H100:1")
 def run_ab(*, git_repo: str, git_ref: str, model_preset: str, num_gpus: int, install_fa3: bool,
-           enable_compile: bool, num_prompts: int, ec_thresh: float, ec_warmup: int, ec_tail: int,
+           enable_compile: bool, num_prompts: int, ec_thresholds: list[float], ec_warmup: int, ec_tail: int,
            cd_thresholds: list[float], cd_fn: int, cd_bn: int, cd_warmup: int, taylorseer: bool,
            taylorseer_order: int) -> dict:
     import subprocess
@@ -250,9 +250,13 @@ def run_ab(*, git_repo: str, git_ref: str, model_preset: str, num_gpus: int, ins
 
     method_summaries: list[tuple[str, dict]] = []
 
-    print(f"\n--- EasyCache pass (thresh={ec_thresh} warmup={ec_warmup} tail={ec_tail}) ---")
-    ec = _run_easycache(common, f"{out_root}/easycache_t{ec_thresh}", ec_thresh, ec_warmup, ec_tail)
-    method_summaries.append((f"easycache t={ec_thresh}", _summarize(_ssim_vs_baseline(baseline, ec))))
+    for thr in ec_thresholds:
+        print(f"\n--- EasyCache pass (thresh={thr} warmup={ec_warmup} tail={ec_tail}) ---")
+        try:
+            ec = _run_easycache(common, f"{out_root}/easycache_t{thr}", thr, ec_warmup, ec_tail)
+            method_summaries.append((f"easycache t={thr}", _summarize(_ssim_vs_baseline(baseline, ec))))
+        except Exception as e:  # noqa: BLE001 — one bad EasyCache point must not lose the rest
+            print(f"[WARN] EasyCache pass at threshold={thr} failed, skipping: {e}")
 
     for thr in cd_thresholds:
         ts = "+ts" if taylorseer else ""
@@ -271,11 +275,13 @@ def run_ab(*, git_repo: str, git_ref: str, model_preset: str, num_gpus: int, ins
 @app.local_entrypoint()
 def main(gpu: str = "H100", model: str = "wan2_1-t2v-1.3b", num_gpus: int = 0, git_repo: str = "",
          git_ref: str = "compare/easycache-vs-cachedit", enable_compile: bool = False, num_prompts: int = 0,
-         ec_thresh: float = 0.015, ec_warmup: int = 1, ec_tail: int = 1, cd_thresholds: str = "0.08,0.15",
+         ec_thresholds: str = "0.015", ec_warmup: int = 1, ec_tail: int = 1, cd_thresholds: str = "0.08,0.15",
          cd_fn: int = 8, cd_bn: int = 0, cd_warmup: int = 8, taylorseer: bool = True, taylorseer_order: int = 1):
-    """Drive the unconflated EasyCache-vs-cache-dit A/B. ``--cd-thresholds`` is a
-    comma list (sweep to land a cache-dit point near the EasyCache SSIM, so the
-    comparison is speedup-at-matched-quality). ``git_repo`` defaults to ``fork``."""
+    """Drive the unconflated EasyCache-vs-cache-dit A/B. ``--ec-thresholds`` and
+    ``--cd-thresholds`` are comma lists (sweep to land matched-SSIM points so the
+    comparison is speedup-at-matched-quality). Pass ``--cd-thresholds ""`` to skip
+    cache-dit (e.g. extend the EasyCache frontier against a baseline you've already
+    paired cache-dit to). ``git_repo`` defaults to ``fork``."""
     import subprocess
 
     if model not in MODEL_PRESETS:
@@ -293,14 +299,15 @@ def main(gpu: str = "H100", model: str = "wan2_1-t2v-1.3b", num_gpus: int = 0, g
         if not git_repo:
             raise RuntimeError("Could not resolve git_repo. Pass --git-repo or configure a 'fork'/'origin' remote.")
 
+    ec_list = [float(x) for x in ec_thresholds.split(",") if x.strip()]
     cd_list = [float(x) for x in cd_thresholds.split(",") if x.strip()]
     install_fa3 = gpu.upper().startswith("H100") or gpu.upper().startswith("H200")
     print(f"GPU: {gpu}:{num_gpus}  model: {model}  ref: {git_ref}  install_fa3: {install_fa3}  "
-          f"prompts: {num_prompts or 'all'}  easycache: t={ec_thresh}  "
+          f"prompts: {num_prompts or 'all'}  easycache: t={ec_list}  "
           f"cachedit: t={cd_list} taylorseer={taylorseer}(o{taylorseer_order})  repo: {git_repo}")
 
     run_ab.with_options(gpu=f"{gpu}:{num_gpus}").remote(
         git_repo=git_repo, git_ref=git_ref, model_preset=model, num_gpus=num_gpus, install_fa3=install_fa3,
-        enable_compile=enable_compile, num_prompts=num_prompts, ec_thresh=ec_thresh, ec_warmup=ec_warmup,
+        enable_compile=enable_compile, num_prompts=num_prompts, ec_thresholds=ec_list, ec_warmup=ec_warmup,
         ec_tail=ec_tail, cd_thresholds=cd_list, cd_fn=cd_fn, cd_bn=cd_bn, cd_warmup=cd_warmup,
         taylorseer=taylorseer, taylorseer_order=taylorseer_order)
