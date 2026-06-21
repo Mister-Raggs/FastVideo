@@ -74,6 +74,20 @@ def test_counters_and_summary_track_skips():
     assert "skipped=3" in ec.summary()
 
 
+def test_invalidate_drops_cache_and_forces_compute():
+    # Simulates a model swap (e.g. Wan2.2 MoE boundary): the stale residual must
+    # not be reused, so invalidate() clears state and the next step recomputes
+    # even under a huge threshold.
+    ec = EasyCache(thresh=1e9, warmup_steps=0, tail_steps=0)
+    ec.start(num_steps=10)
+    ec.update(torch.zeros(4), torch.ones(4))
+    ec.update(torch.full((4, ), 0.1), torch.full((4, ), 1.1))  # learns k + caches
+    assert ec._cache_cond is not None and ec.k is not None
+    ec.invalidate()
+    assert ec._cache_cond is None and ec.k is None
+    assert ec.should_compute(torch.full((4, ), 0.2), 5)  # no history -> must compute
+
+
 def test_reset_clears_state():
     ec = EasyCache()
     ec.start(num_steps=4)

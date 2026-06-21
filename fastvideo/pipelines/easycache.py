@@ -99,6 +99,24 @@ class EasyCache:
             self.skipped += 1
         return calc
 
+    def invalidate(self) -> None:
+        """Drop learned state and residual caches without touching counters.
+
+        Call this when the underlying model swaps mid-trajectory — e.g. Wan2.2's
+        MoE high-noise/low-noise expert switch at the boundary timestep. A
+        residual cached by one expert must never be reused by another, and the
+        cross-boundary output delta would corrupt ``k``; clearing here forces a
+        fresh compute (caches/``k`` are ``None``, so :meth:`should_compute`
+        returns True) so the cache re-anchors on the new model.
+        """
+        self.k = None
+        self.accumulated_error = 0.0
+        self._prev_step_input = None
+        self._last_compute_input = None
+        self._last_compute_output = None
+        self._cache_cond = None
+        self._cache_uncond = None
+
     def reuse(self, x: torch.Tensor, cond: bool = True) -> torch.Tensor:
         """Reconstruct a skipped step's prediction: ``output = input + residual``."""
         cache = self._cache_cond if cond else self._cache_uncond

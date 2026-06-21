@@ -348,6 +348,7 @@ class DenoisingStage(PipelineStage):
         # step/uncond-skip optimizations); disabling the gate keeps cond+uncond
         # freshly computed on every computed step so both residual caches stay valid.
         _easycache = None
+        _easycache_model_id = None
         if getattr(batch, "enable_easycache", False):
             from fastvideo.pipelines.easycache import EasyCache
             _easycache = EasyCache(thresh=getattr(batch, "easycache_thresh", 0.05),
@@ -450,8 +451,16 @@ class DenoisingStage(PipelineStage):
 
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                # EasyCache: decide once per step (on the cond input) whether the
-                # DiT forward can be skipped and the cached residual reused.
+                # EasyCache: invalidate the cache when the active model swaps
+                # (e.g. Wan2.2's MoE high/low-noise expert switch at the boundary)
+                # so a residual from one expert is never reused by another; then
+                # decide once per step (on the cond input) whether the DiT forward
+                # can be skipped and the cached residual reused.
+                if _easycache is not None:
+                    _cur_model_id = id(current_model)
+                    if _easycache_model_id is not None and _cur_model_id != _easycache_model_id:
+                        _easycache.invalidate()
+                    _easycache_model_id = _cur_model_id
                 _ec_skip = (_easycache is not None and not _easycache.should_compute(latent_model_input, i))
 
                 # Predict noise residual
