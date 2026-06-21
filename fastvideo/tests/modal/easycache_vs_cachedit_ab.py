@@ -73,10 +73,12 @@ MODEL_PRESETS = {
         "height": 720, "width": 1280, "num_frames": 77, "num_inference_steps": 30, "default_num_gpus": 1,
     },
     # Footnote only (Will scoped the comparison to Wan2.1). The A14B MoE swaps
-    # experts at the boundary; EasyCache is a weaker fit there. 720p/49f on 2 GPU.
+    # experts at the boundary; EasyCache is a weaker fit there. 480p keeps the
+    # two-resident-expert footprint inside H100:2 with offload off (720p OOMs),
+    # and matches the resolution the prior 0.68 Wan2.2 number was measured at.
     "wan2_2-t2v-14b": {
         "model_id": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        "height": 720, "width": 1280, "num_frames": 49, "num_inference_steps": 30, "default_num_gpus": 2,
+        "height": 480, "width": 832, "num_frames": 49, "num_inference_steps": 30, "default_num_gpus": 2,
     },
 }
 
@@ -103,7 +105,7 @@ fi
 git checkout {shlex.quote(git_ref)}
 git submodule update --init --recursive
 {fa3_step}
-uv pip install -e ".[test]"
+uv pip install -e ".[test,cache]"
 uv pip install hf_transfer
 cd fastvideo-kernel && ./build.sh && cd ..
 export HF_HOME=/root/data/.cache
@@ -255,9 +257,12 @@ def run_ab(*, git_repo: str, git_ref: str, model_preset: str, num_gpus: int, ins
     for thr in cd_thresholds:
         ts = "+ts" if taylorseer else ""
         print(f"\n--- cache-dit pass (threshold={thr} fn={cd_fn} bn={cd_bn} taylorseer={taylorseer}) ---")
-        cd = _run_cachedit(common, f"{out_root}/cachedit_t{thr}", thr, cd_fn, cd_bn, cd_warmup, taylorseer,
-                           taylorseer_order)
-        method_summaries.append((f"cachedit t={thr}{ts}", _summarize(_ssim_vs_baseline(baseline, cd))))
+        try:
+            cd = _run_cachedit(common, f"{out_root}/cachedit_t{thr}", thr, cd_fn, cd_bn, cd_warmup, taylorseer,
+                               taylorseer_order)
+            method_summaries.append((f"cachedit t={thr}{ts}", _summarize(_ssim_vs_baseline(baseline, cd))))
+        except Exception as e:  # noqa: BLE001 — one bad cache-dit point must not lose the EasyCache rows
+            print(f"[WARN] cache-dit pass at threshold={thr} failed, skipping: {e}")
 
     _print_report(model_preset, method_summaries)
     return {"model_preset": model_preset, "methods": method_summaries}
