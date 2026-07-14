@@ -58,9 +58,10 @@ def _env_float(name: str, default: float) -> float:
 
 # Distilled QAD transformer, loaded on top of the base Wan2.1-1.3B pipeline.
 DEFAULT_DISTILLED = "FastVideo/FastWan-QAD-1.3B"
-DISTILLED_WEIGHTS_FILE = (
-    "generator_inference_transformer/diffusion_pytorch_model.safetensors"
-)
+# The repo is a full diffusers pipeline; we overlay only its transformer onto the
+# base Wan pipeline (vae/text_encoder are Wan-identical). Old example path
+# "generator_inference_transformer/..." is stale (404) — repo was re-laid-out.
+DISTILLED_WEIGHTS_FILE = "transformer/diffusion_pytorch_model.safetensors"
 
 PROMPT = (
     "A curious raccoon peers through a vibrant field of yellow sunflowers, its eyes "
