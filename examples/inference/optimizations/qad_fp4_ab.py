@@ -144,18 +144,25 @@ def main() -> None:
           f"attention={attn}, {steps} steps, guidance {guidance}, "
           f"{height}x{width}x{frames}, seed {seed}")
 
-    os.makedirs(out_dir, exist_ok=True)
+    arm_dir = os.path.join(out_dir, tag)
+    os.makedirs(arm_dir, exist_ok=True)
     generator = build_generator(fp4_linear)
 
     def _generate():
+        # seed + frame dims live under `sampling` (SamplingConfig); `output`
+        # only takes output_path/save_video/return_frames (OutputConfig).
         return generator.generate(request={
             "prompt": PROMPT,
-            "seed": seed,
-            "sampling": {"num_inference_steps": steps, "guidance_scale": guidance},
-            "output": {
-                "height": height, "width": width, "num_frames": frames,
-                "save_video": False,
+            "sampling": {
+                "seed": seed,
+                "num_inference_steps": steps,
+                "guidance_scale": guidance,
+                "height": height,
+                "width": width,
+                "num_frames": frames,
             },
+            "output": {"save_video": True, "output_path": arm_dir,
+                       "return_frames": True},
         })
 
     for _ in range(warmup):
@@ -173,24 +180,24 @@ def main() -> None:
         print(f"[qad] {tag} run {i + 1}/{runs}: {wall:.2f}s wall "
               f"(denoise {denoise_times[-1]:.2f}s)")
 
-    # Save the final run's media for the eyeball A/B.
-    out_mp4 = os.path.join(out_dir, f"raccoon_{tag}.mp4")
-    frames_np = getattr(last, "samples", None) if last is not None else None
-    if frames_np is not None:
+    # The pipeline wrote the mp4 (full known-good encode) into arm_dir; report
+    # it and pull a matching-frame still from the [b,c,t,h,w] samples tensor
+    # using the same recipe the pipeline's frame builder uses.
+    import glob
+    mp4s = sorted(glob.glob(os.path.join(arm_dir, "*.mp4")), key=os.path.getmtime)
+    if mp4s:
+        print(f"[qad] video: {mp4s[-1]}")
+    samples = getattr(last, "samples", None) if last is not None else None
+    if samples is not None and getattr(samples, "ndim", 0) == 5:
         import imageio
-        arr = frames_np
-        if hasattr(arr, "detach"):  # tensor [B,C,T,H,W] or [T,H,W,C]
-            arr = arr.detach().float().cpu()
-            if arr.ndim == 5:  # NCTHW -> THWC
-                arr = arr[0].permute(1, 2, 3, 0)
-            arr = (arr.clamp(0, 1) * 255).to(torch.uint8).numpy()
-        imageio.mimsave(out_mp4, arr, fps=16)
-        # matching-frame still for the side-by-side.
-        f = min(still_idx, len(arr) - 1)
-        imageio.imwrite(os.path.join(out_dir, f"raccoon_{tag}_f{f}.png"), arr[f])
-        print(f"[qad] saved {out_mp4}  (+ still f{f})")
+        f = min(still_idx, samples.shape[2] - 1)  # samples: [b, c, t, h, w]
+        still = (samples[0, :, f].permute(1, 2, 0).clamp(0, 1) * 255)
+        still = still.to(torch.uint8).cpu().numpy()
+        png = os.path.join(arm_dir, f"raccoon_{tag}_f{f}.png")
+        imageio.imwrite(png, still)
+        print(f"[qad] still: {png}")
     else:
-        print("[qad] WARNING: no frames on result; re-run with the Wan VAE path")
+        print("[qad] note: no 5-D samples tensor; grab a frame from the mp4 above")
 
     mean = sum(denoise_times) / len(denoise_times)
     print(f"\n[qad][{tag}] denoise mean {mean:.2f}s over {runs} runs "
