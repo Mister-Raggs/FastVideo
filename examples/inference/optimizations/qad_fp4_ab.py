@@ -136,6 +136,7 @@ def main() -> None:
     runs = _env_int("QAD_RUNS", 3)
     still_idx = _env_int("QAD_STILL", 20)
     out_dir = _env("QAD_OUT", "qad_fp4_samples")
+    prompt = _env("QAD_PROMPT", PROMPT)
 
     tag = f"lin-{'fp4' if fp4_linear else 'bf16'}_attn-{attn.lower()}"
     cap = torch.cuda.get_device_capability()
@@ -143,6 +144,7 @@ def main() -> None:
     print(f"[qad] ARM {tag}: linear={'FP4' if fp4_linear else 'bf16'}, "
           f"attention={attn}, {steps} steps, guidance {guidance}, "
           f"{height}x{width}x{frames}, seed {seed}")
+    print(f"[qad] prompt: {prompt[:80]}{'...' if len(prompt) > 80 else ''}")
 
     arm_dir = os.path.join(out_dir, tag)
     os.makedirs(arm_dir, exist_ok=True)
@@ -152,7 +154,7 @@ def main() -> None:
         # seed + frame dims live under `sampling` (SamplingConfig); `output`
         # only takes output_path/save_video/return_frames (OutputConfig).
         return generator.generate(request={
-            "prompt": PROMPT,
+            "prompt": prompt,
             "sampling": {
                 "seed": seed,
                 "num_inference_steps": steps,
