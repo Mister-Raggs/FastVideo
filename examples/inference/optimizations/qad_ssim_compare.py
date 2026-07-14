@@ -72,12 +72,16 @@ def _read_frames(path: str) -> list[np.ndarray]:
 def _resolve(arg: str, base: str) -> str:
     if os.path.isfile(arg):
         return arg
-    cand = os.path.join(base, arg)
-    if os.path.isdir(cand):
-        mp4s = sorted(glob.glob(os.path.join(cand, "*.mp4")), key=os.path.getmtime)
-        if mp4s:
-            return mp4s[-1]
-    raise SystemExit(f"no mp4 found for {arg!r} (looked at {cand!r})")
+    # arg may be a full dir path (possibly already including base) OR a bare
+    # arm name under base — try both.
+    tried = []
+    for cand in (arg, os.path.join(base, arg)):
+        tried.append(cand)
+        if os.path.isdir(cand):
+            mp4s = sorted(glob.glob(os.path.join(cand, "*.mp4")), key=os.path.getmtime)
+            if mp4s:
+                return mp4s[-1]
+    raise SystemExit(f"no mp4 found for {arg!r} (looked at {tried})")
 
 
 def _to_tensor(frame: np.ndarray) -> torch.Tensor:
