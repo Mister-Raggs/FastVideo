@@ -186,7 +186,8 @@ class WanSelfAttention(nn.Module):
             causal=False,
             supported_attention_backends=(AttentionBackendEnum.FLASH_ATTN,
                                           AttentionBackendEnum.TORCH_SDPA,
-                                          AttentionBackendEnum.ATTN_QAT_INFER))
+                                          AttentionBackendEnum.ATTN_QAT_INFER,
+                                          AttentionBackendEnum.ATTN_QAT_TRAIN))
 
     def forward(self, x: torch.Tensor, context: torch.Tensor,
                 context_lens: int):
