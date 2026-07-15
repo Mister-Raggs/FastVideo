@@ -33,6 +33,14 @@ app = modal.App("qat-finetune")
 
 model_vol = modal.Volume.from_name("hf-model-weights")
 hf_secret = modal.Secret.from_name("huggingface-token")
+# Optional wandb creds pulled from your LOCAL env at `modal run` time (empty
+# dict if unset — harmless when running offline). Export WANDB_API_KEY locally
+# and pass --wandb-online for a live dashboard.
+wandb_secret = modal.Secret.from_dict({
+    k: os.environ[k]
+    for k in ("WANDB_API_KEY", "WANDB_ENTITY", "WANDB_BASE_URL")
+    if os.environ.get(k)
+})
 image_tag = f"ghcr.io/hao-ai-lab/fastvideo/fastvideo-dev:{os.getenv('IMAGE_VERSION', 'py3.12-latest')}"
 
 image = (modal.Image.from_registry(image_tag, add_python="3.12").apt_install(
@@ -44,8 +52,9 @@ image = (modal.Image.from_registry(image_tag, add_python="3.12").apt_install(
 
 
 def _workspace_and_train_command(git_repo: str, git_ref: str, num_gpus: int, max_steps: int,
-                                 validation_steps: int, ckpt_steps: int) -> str:
+                                 validation_steps: int, ckpt_steps: int, wandb_online: bool) -> str:
     import shlex
+    wandb_mode = "online" if wandb_online else "offline"
     return f"""
 set -euxo pipefail
 source $HOME/.local/bin/env
@@ -63,19 +72,21 @@ cd fastvideo-kernel && ./build.sh && cd ..
 export HF_HOME=/root/data/.cache
 hf auth login --token "$HF_TOKEN"
 export NUM_GPUS={num_gpus} MAX_STEPS={max_steps} VALIDATION_STEPS={validation_steps} CKPT_STEPS={ckpt_steps}
-export WANDB_MODE=offline
+export WANDB_MODE={wandb_mode}
 bash examples/training/finetune/wan_t2v_1.3B/mixkit/run_qat_finetune.sh
 """
 
 
-@app.function(image=image, timeout=86400, volumes={"/root/data": model_vol}, secrets=[hf_secret], gpu="L40S:4")
+@app.function(image=image, timeout=86400, volumes={"/root/data": model_vol},
+              secrets=[hf_secret, wandb_secret], gpu="L40S:4")
 def run_qat(*, git_repo: str, git_ref: str, num_gpus: int, max_steps: int, validation_steps: int,
-            ckpt_steps: int) -> dict:
+            ckpt_steps: int, wandb_online: bool) -> dict:
     import subprocess
 
     if "HF_TOKEN" not in os.environ:
         raise RuntimeError("HF_TOKEN not set — Modal Secret 'huggingface-token' missing the HF_TOKEN key.")
-    cmd = _workspace_and_train_command(git_repo, git_ref, num_gpus, max_steps, validation_steps, ckpt_steps)
+    cmd = _workspace_and_train_command(git_repo, git_ref, num_gpus, max_steps, validation_steps, ckpt_steps,
+                                       wandb_online)
     try:
         subprocess.run(["/bin/bash", "-lc", cmd], env=os.environ.copy(), check=True)
     finally:
@@ -86,12 +97,16 @@ def run_qat(*, git_repo: str, git_ref: str, num_gpus: int, max_steps: int, valid
 
 @app.local_entrypoint()
 def main(gpu: str = "L40S", num_gpus: int = 4, git_repo: str = "", git_ref: str = "spark/qad-fp4-quality",
-         max_steps: int = 2000, validation_steps: int = 200, ckpt_steps: int = 500):
+         max_steps: int = 2000, validation_steps: int = 200, ckpt_steps: int = 500, wandb_online: bool = False):
     """Drive the QAT finetune from your laptop. Pilot: ``--max-steps 300
-    --validation-steps 100 --ckpt-steps 300``. ``git_repo`` defaults to the
-    ``fork`` remote."""
+    --validation-steps 100 --ckpt-steps 300``. ``--wandb-online`` streams a live
+    dashboard (needs WANDB_API_KEY exported locally). ``git_repo`` defaults to
+    the ``fork`` remote."""
     import subprocess
 
+    if wandb_online and not os.environ.get("WANDB_API_KEY"):
+        raise RuntimeError("--wandb-online needs WANDB_API_KEY exported in your local shell "
+                           "(it's injected into the container as a Modal secret).")
     if not git_repo:
         for remote in ("fork", "origin"):
             try:
@@ -104,7 +119,8 @@ def main(gpu: str = "L40S", num_gpus: int = 4, git_repo: str = "", git_ref: str 
             raise RuntimeError("Could not resolve git_repo. Pass --git-repo or configure a 'fork'/'origin' remote.")
 
     print(f"GPU: {gpu}:{num_gpus}  ref: {git_ref}  max_steps: {max_steps}  "
-          f"validation_steps: {validation_steps}  ckpt_steps: {ckpt_steps}  repo: {git_repo}")
+          f"validation_steps: {validation_steps}  ckpt_steps: {ckpt_steps}  "
+          f"wandb: {'online' if wandb_online else 'offline'}  repo: {git_repo}")
     run_qat.with_options(gpu=f"{gpu}:{num_gpus}").remote(
         git_repo=git_repo, git_ref=git_ref, num_gpus=num_gpus, max_steps=max_steps,
-        validation_steps=validation_steps, ckpt_steps=ckpt_steps)
+        validation_steps=validation_steps, ckpt_steps=ckpt_steps, wandb_online=wandb_online)
