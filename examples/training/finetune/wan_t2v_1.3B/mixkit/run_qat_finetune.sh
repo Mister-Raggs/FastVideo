@@ -42,6 +42,24 @@ if [ ! -d "${DATA_DIR}" ]; then
     --local_dir "${DATA_ROOT}" --repo_type "dataset"
 fi
 
+# 1b. PREFLIGHT — the fake-quant train kernel must actually import, else the
+#     selector silently filters ATTN_QAT_TRAIN and attention falls back to Flash
+#     (a NON-QAT run) upstream of the cuda.py hard-fail guard. Surface the real
+#     error and refuse to proceed rather than waste a run.
+echo "[qat] preflight: importing fastvideo_kernel.triton_kernels.attn_qat_train ..."
+python - <<'PY' || { echo "[qat] PREFLIGHT FAILED — attn_qat_train kernel not importable; aborting (would train NON-QAT)."; exit 3; }
+import importlib, sys, traceback
+sys.path.insert(0, "fastvideo-kernel/python")
+sys.path.insert(0, "fastvideo-kernel")
+try:
+    m = importlib.import_module("fastvideo_kernel.triton_kernels.attn_qat_train")
+    _ = m.attention
+    print("[qat] preflight OK: attn_qat_train.attention importable")
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
+PY
+
 # 2. Train — identical hyperparams to finetune_qat.sh (LR 5e-5, wd 1e-4,
 #    grad-norm 1.0, bf16 + fp32 master, cfg-rate 0.1, 50 euler timesteps).
 torchrun --nnodes 1 --nproc_per_node "${NUM_GPUS}" \
