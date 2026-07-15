@@ -306,9 +306,12 @@ class WanTransformerBlock(nn.Module):
 
         # 1. Self-attention
         self.norm1 = FP32LayerNorm(dim, eps, elementwise_affine=False)
-        self.to_q = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config, prefix=f"{prefix}.to_q")
-        self.to_k = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config, prefix=f"{prefix}.to_k")
-        self.to_v = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config, prefix=f"{prefix}.to_v")
+        # Fused QKV projection: the three self-attention projections share the
+        # same input, so a single dim -> 3*dim GEMM replaces to_q/to_k/to_v
+        # (one launch, one weight prologue). Checkpoint q/k/v are concatenated
+        # along the output dim at load time via param_names_mapping. See
+        # WanVideoArchConfig.param_names_mapping.
+        self.to_qkv = ReplicatedLinear(dim, 3 * dim, bias=True, quant_config=quant_config, prefix=f"{prefix}.to_qkv")
 
         self.to_out = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config, prefix=f"{prefix}.to_out")
         self.attn1 = DistributedAttention(
@@ -406,9 +409,8 @@ class WanTransformerBlock(nn.Module):
         # 1. Self-attention
         norm_hidden_states = (self.norm1(hidden_states.float()) *
                               (1 + scale_msa) + shift_msa).to(orig_dtype)
-        query, _ = self.to_q(norm_hidden_states)
-        key, _ = self.to_k(norm_hidden_states)
-        value, _ = self.to_v(norm_hidden_states)
+        qkv, _ = self.to_qkv(norm_hidden_states)
+        query, key, value = qkv.chunk(3, dim=-1)
 
         if self.norm_q is not None:
             query = self.norm_q(query)
@@ -471,9 +473,9 @@ class WanTransformerBlock_VSA(nn.Module):
 
         # 1. Self-attention
         self.norm1 = FP32LayerNorm(dim, eps, elementwise_affine=False)
-        self.to_q = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config, prefix=f"{prefix}.to_q")
-        self.to_k = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config, prefix=f"{prefix}.to_k")
-        self.to_v = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config, prefix=f"{prefix}.to_v")
+        # Fused QKV projection (see WanTransformerBlock). to_gate_compress stays
+        # separate — it feeds the VSA compress path, not the attention QKV.
+        self.to_qkv = ReplicatedLinear(dim, 3 * dim, bias=True, quant_config=quant_config, prefix=f"{prefix}.to_qkv")
         self.to_gate_compress = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config, prefix=f"{prefix}.to_gate_compress")
         self.to_out = ReplicatedLinear(dim, dim, bias=True, quant_config=quant_config, prefix=f"{prefix}.to_out")
         self.attn1 = DistributedAttention_VSA(
@@ -556,9 +558,8 @@ class WanTransformerBlock_VSA(nn.Module):
         # 1. Self-attention
         norm_hidden_states = (self.norm1(hidden_states.float()) *
                               (1 + scale_msa) + shift_msa).to(orig_dtype)
-        query, _ = self.to_q(norm_hidden_states)
-        key, _ = self.to_k(norm_hidden_states)
-        value, _ = self.to_v(norm_hidden_states)
+        qkv, _ = self.to_qkv(norm_hidden_states)
+        query, key, value = qkv.chunk(3, dim=-1)
         gate_compress, _ = self.to_gate_compress(norm_hidden_states)
 
         if self.norm_q is not None:

@@ -227,9 +227,9 @@ class CausalWanTransformerBlock(nn.Module):
 
         # 1. Self-attention
         self.norm1 = nn.LayerNorm(dim, eps, elementwise_affine=False)
-        self.to_q = ReplicatedLinear(dim, dim, bias=True)
-        self.to_k = ReplicatedLinear(dim, dim, bias=True)
-        self.to_v = ReplicatedLinear(dim, dim, bias=True)
+        # Fused QKV projection (see WanTransformerBlock in wanvideo.py). Shares
+        # WanVideoConfig.param_names_mapping, which merges checkpoint q/k/v.
+        self.to_qkv = ReplicatedLinear(dim, 3 * dim, bias=True)
 
         self.to_out = ReplicatedLinear(dim, dim, bias=True)
         self.attn1 = CausalWanSelfAttention(
@@ -318,9 +318,8 @@ class CausalWanTransformerBlock(nn.Module):
         # 1. Self-attention
         norm_hidden_states = (self.norm1(hidden_states).unflatten(dim=1, sizes=(temb_seq_len, tokens_per_temb)) *
                         (1 + scale_msa) + shift_msa).flatten(1, 2)
-        query, _ = self.to_q(norm_hidden_states)
-        key, _ = self.to_k(norm_hidden_states)
-        value, _ = self.to_v(norm_hidden_states)
+        qkv, _ = self.to_qkv(norm_hidden_states)
+        query, key, value = qkv.chunk(3, dim=-1)
 
         if self.norm_q is not None:
             query = self.norm_q(query)
