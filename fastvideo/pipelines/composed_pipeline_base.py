@@ -107,6 +107,18 @@ class ComposedPipelineBase(ABC):
         if not compile_conditions:
             return 0
 
+        # Experiment (env-gated, no-op unless set): the Wan VAE codec is compiled
+        # as one graph and legitimately sees many specializations — 3 channel
+        # counts (384/192/96) x per-index feat_cache state (`_feat_cache[idx] is
+        # None`) — so it blows past dynamo's default recompile_limit (8/16) and
+        # falls back to eager. Raising the limit lets every variant compile
+        # instead, at a longer cold-warmup. Sizes whether the eager fallback is
+        # worth a real fix.
+        _recompile_limit = os.environ.get("FASTVIDEO_RECOMPILE_LIMIT")
+        if _recompile_limit:
+            import torch._dynamo
+            torch._dynamo.config.recompile_limit = int(_recompile_limit)
+
         compiled_count = 0
         for name, submodule in module.named_modules():
             if not name:
