@@ -105,7 +105,13 @@ class NVFP4QATQuantizeMethod(QuantizeMethodBase):
         out_dim = layer._fp4_weight.shape[0]
         original_shape = x.shape
 
-        assert x.dtype in (torch.bfloat16, torch.float16), (f"only allow bf16/fp16 inputs to fp4 linear, got {x.dtype}")
+        # Cast fp32 (e.g. a LayerNorm tail upcast, as in Cosmos-2.5) down at the
+        # boundary — the same cast a regular linear gets under autocast; matches
+        # the NVFP4 handling from #1488. Non-floating inputs are a genuine error.
+        if not x.is_floating_point():
+            raise TypeError(f"fp4 linear expects floating-point inputs, got {x.dtype}")
+        if x.dtype not in (torch.bfloat16, torch.float16):
+            x = x.to(torch.bfloat16)
         x = x.view(-1, x.shape[-1])
         x_global_sf = self.x_global_sf
         x_fp4, x_scale = _nvfp4_quantize(

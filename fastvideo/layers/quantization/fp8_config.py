@@ -101,7 +101,13 @@ class FP8QuantizeMethod(QuantizeMethodBase):
 
     def quantize_input(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
         """Pre-quantize an activation for reuse across q/k/v projections."""
-        assert x.dtype in (torch.bfloat16, torch.float16), (f"only allow bf16/fp16 inputs to fp8 linear, got {x.dtype}")
+        # Cast fp32 (e.g. a LayerNorm tail upcast, as in Cosmos-2.5) down at the
+        # boundary — the same cast a regular linear gets under autocast; matches
+        # the NVFP4 handling from #1488. Non-floating inputs are a genuine error.
+        if not x.is_floating_point():
+            raise TypeError(f"fp8 linear expects floating-point inputs, got {x.dtype}")
+        if x.dtype not in (torch.bfloat16, torch.float16):
+            x = x.to(torch.bfloat16)
         x_2d = x.view(-1, x.shape[-1])
         if self.granularity == "channel":
             x_fp8, x_scale = _quantize_rowwise(x_2d)
