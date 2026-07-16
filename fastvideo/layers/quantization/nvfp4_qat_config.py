@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_FP4_LAYERS = (
     "ffn.fc_in",
     "ffn.fc_out",
+    # Cosmos names its FFN attribute ``mlp`` (Wan uses ``ffn``); both are the
+    # same fastvideo.layers.mlp.MLP module.
+    "mlp.fc_in",
+    "mlp.fc_out",
     "to_q",
     "to_k",
     "to_v",

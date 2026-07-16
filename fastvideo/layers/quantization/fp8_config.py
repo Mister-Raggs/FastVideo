@@ -29,6 +29,10 @@ FP8_MIN_SCALE = 1.0 / (FP8_MAX * 512.0)
 _FP8_SUFFIXES = (
     "ffn.fc_in",
     "ffn.fc_out",
+    # Cosmos names its FFN attribute ``mlp`` (Wan uses ``ffn``); both are the
+    # same fastvideo.layers.mlp.MLP module.
+    "mlp.fc_in",
+    "mlp.fc_out",
     "to_q",
     "to_k",
     "to_v",

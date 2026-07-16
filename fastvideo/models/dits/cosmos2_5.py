@@ -14,6 +14,7 @@ from fastvideo.forward_context import get_forward_context
 from fastvideo.layers.layernorm import RMSNorm
 from fastvideo.layers.linear import ReplicatedLinear
 from fastvideo.layers.mlp import MLP
+from fastvideo.layers.quantization import QuantizationConfig
 from fastvideo.layers.rotary_embedding import apply_rotary_emb
 from fastvideo.layers.visual_embedding import Timesteps
 from fastvideo.models.dits.base import BaseDiT
@@ -207,6 +208,8 @@ class Cosmos25SelfAttention(nn.Module):
         qk_norm: bool = True,
         eps: float = 1e-6,
         supported_attention_backends: tuple[AttentionBackendEnum, ...] | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         assert dim % num_heads == 0
         super().__init__()
@@ -214,10 +217,10 @@ class Cosmos25SelfAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
 
-        self.to_q = ReplicatedLinear(dim, dim, bias=False)
-        self.to_k = ReplicatedLinear(dim, dim, bias=False)
-        self.to_v = ReplicatedLinear(dim, dim, bias=False)
-        self.to_out = ReplicatedLinear(dim, dim, bias=False)
+        self.to_q = ReplicatedLinear(dim, dim, bias=False, quant_config=quant_config, prefix=f"{prefix}.to_q")
+        self.to_k = ReplicatedLinear(dim, dim, bias=False, quant_config=quant_config, prefix=f"{prefix}.to_k")
+        self.to_v = ReplicatedLinear(dim, dim, bias=False, quant_config=quant_config, prefix=f"{prefix}.to_v")
+        self.to_out = ReplicatedLinear(dim, dim, bias=False, quant_config=quant_config, prefix=f"{prefix}.to_out")
 
         self.norm_q = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
@@ -295,6 +298,8 @@ class Cosmos25CrossAttention(nn.Module):
         qk_norm: bool = True,
         eps: float = 1e-6,
         supported_attention_backends: tuple[AttentionBackendEnum, ...] | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         assert dim % num_heads == 0
         super().__init__()
@@ -303,10 +308,10 @@ class Cosmos25CrossAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
 
-        self.to_q = ReplicatedLinear(dim, dim, bias=False)
-        self.to_k = ReplicatedLinear(cross_attention_dim, dim, bias=False)
-        self.to_v = ReplicatedLinear(cross_attention_dim, dim, bias=False)
-        self.to_out = ReplicatedLinear(dim, dim, bias=False)
+        self.to_q = ReplicatedLinear(dim, dim, bias=False, quant_config=quant_config, prefix=f"{prefix}.to_q")
+        self.to_k = ReplicatedLinear(cross_attention_dim, dim, bias=False, quant_config=quant_config, prefix=f"{prefix}.to_k")
+        self.to_v = ReplicatedLinear(cross_attention_dim, dim, bias=False, quant_config=quant_config, prefix=f"{prefix}.to_v")
+        self.to_out = ReplicatedLinear(dim, dim, bias=False, quant_config=quant_config, prefix=f"{prefix}.to_out")
 
         self.norm_q = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
@@ -376,6 +381,8 @@ class Cosmos25TransformerBlock(nn.Module):
         use_adaln_lora: bool = True,
         qk_norm: bool = True,
         supported_attention_backends: tuple[AttentionBackendEnum, ...] | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -393,6 +400,8 @@ class Cosmos25TransformerBlock(nn.Module):
             num_heads=num_attention_heads,
             qk_norm=qk_norm,
             supported_attention_backends=supported_attention_backends,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn1",
         )
         self.attn2 = Cosmos25CrossAttention(
             dim=hidden_size,
@@ -400,8 +409,15 @@ class Cosmos25TransformerBlock(nn.Module):
             num_heads=num_attention_heads,
             qk_norm=qk_norm,
             supported_attention_backends=supported_attention_backends,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn2",
         )
-        self.mlp = MLP(hidden_size, int(hidden_size * mlp_ratio), act_type="gelu", bias=False)
+        self.mlp = MLP(hidden_size,
+                       int(hidden_size * mlp_ratio),
+                       act_type="gelu",
+                       bias=False,
+                       quant_config=quant_config,
+                       prefix=f"{prefix}.mlp")
 
         # AdaLN modulation layers (compute shift/scale/gate for each sub-layer)
         # These match the official model's adaln_modulation_* layers
@@ -822,6 +838,8 @@ class Cosmos25Transformer3DModel(BaseDiT):
                 use_adaln_lora=self.use_adaln_lora,
                 qk_norm=(config.qk_norm == "rms_norm"),
                 supported_attention_backends=config._supported_attention_backends,
+                quant_config=config.quant_config,
+                prefix=f"transformer_blocks.{i}",
             )
             for i in range(config.num_layers)
         ])
