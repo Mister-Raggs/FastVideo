@@ -36,7 +36,7 @@ DEFAULT_SEQS = "2048,8192,32760"
 
 @app.function(gpu=GPU_TYPE, image=image, timeout=1200)
 def run(model: str, dtype_str: str, seqs: list[int], bs: int, iters: int,
-        warmup: int) -> str:
+        warmup: int, do_compile: bool = True) -> str:
     import statistics
 
     import torch
@@ -89,40 +89,48 @@ def run(model: str, dtype_str: str, seqs: list[int], bs: int, iters: int,
             b = torch.randn(dim, device=device, dtype=dtype)
             split_wq.append((wq, ws, b))
 
-        hdr = (f"  {'seq':>7} {'naive us':>10} {'shared us':>11} "
+        def naive(x2):  # quantize x separately inside each projection (3x)
+            outs = []
+            for wq, ws, b in split_wq:
+                xq, xs = q(x2)
+                outs.append(torch._scaled_mm(xq, wq.t(), xs, ws, bias=b,
+                                             out_dtype=dtype,
+                                             use_fast_accum=True))
+            return outs
+
+        def shared(x2):  # quantize x once, reuse across q/k/v (1x)
+            xq, xs = q(x2)
+            return [torch._scaled_mm(xq, wq.t(), xs, ws, bias=b,
+                                     out_dtype=dtype, use_fast_accum=True)
+                    for wq, ws, b in split_wq]
+
+        # 'compile' answers the key question: does inductor CSE the 3 identical
+        # quant(x) calls in naive down to 1, making the sharing redundant? If
+        # naive~=shared under compile, the win is eager-only.
+        modes = [("eager", naive, shared)]
+        if do_compile:
+            modes.append(("compile", torch.compile(naive), torch.compile(shared)))
+
+        hdr = (f"  {'mode':<8} {'seq':>7} {'naive us':>10} {'shared us':>11} "
                f"{'speedup':>9} {'saved us':>9}")
         log(hdr)
         log("  " + "-" * (len(hdr) - 2))
-        for seq in seqs:
-            M = ((seq + 15) // 16) * 16  # _scaled_mm wants M % 16 == 0
-            x2 = torch.randn(bs * M, dim, device=device, dtype=dtype)
-
-            def naive():  # quantize x separately inside each projection
-                outs = []
-                for wq, ws, b in split_wq:
-                    xq, xs = q(x2)
-                    outs.append(torch._scaled_mm(xq, wq.t(), xs, ws, bias=b,
-                                                 out_dtype=dtype,
-                                                 use_fast_accum=True))
-                return outs
-
-            def shared():  # quantize x once, reuse across q/k/v
-                xq, xs = q(x2)
-                return [torch._scaled_mm(xq, wq.t(), xs, ws, bias=b,
-                                         out_dtype=dtype, use_fast_accum=True)
-                        for wq, ws, b in split_wq]
-
-            try:
-                n_us = time_fn(naive) * 1000.0
-                s_us = time_fn(shared) * 1000.0
-            except Exception as ex:  # noqa: BLE001
-                log(f"  {seq:>7}  fp8 skipped: {type(ex).__name__}: {ex}")
-                continue
-            tag = f"{seq}" + ("" if M == seq else f"->{M}")
-            log(f"  {tag:>7} {n_us:>10.2f} {s_us:>11.2f} "
-                f"{n_us / s_us:>8.2f}x {n_us - s_us:>8.2f}")
-            del x2
-            torch.cuda.empty_cache()
+        for mode, nfn, sfn in modes:
+            for seq in seqs:
+                M = ((seq + 15) // 16) * 16  # _scaled_mm wants M % 16 == 0
+                x2 = torch.randn(bs * M, dim, device=device, dtype=dtype)
+                try:
+                    n_us = time_fn(lambda: nfn(x2)) * 1000.0
+                    s_us = time_fn(lambda: sfn(x2)) * 1000.0
+                except Exception as ex:  # noqa: BLE001
+                    log(f"  {mode:<8} {seq:>7}  fp8 skipped: "
+                        f"{type(ex).__name__}: {ex}")
+                    break
+                tag = f"{seq}" + ("" if M == seq else f"->{M}")
+                log(f"  {mode:<8} {tag:>7} {n_us:>10.2f} {s_us:>11.2f} "
+                    f"{n_us / s_us:>8.2f}x {n_us - s_us:>8.2f}")
+                del x2
+                torch.cuda.empty_cache()
 
     log("\nNotes:")
     log("  * speedup>1 => shared (this branch) faster. The gap is the 2 "
@@ -134,8 +142,9 @@ def run(model: str, dtype_str: str, seqs: list[int], bs: int, iters: int,
 
 @app.local_entrypoint()
 def main(model: str = "all", dtype: str = "bfloat16", seqs: str = DEFAULT_SEQS,
-         bs: int = 1, iters: int = 50, warmup: int = 20) -> None:
+         bs: int = 1, iters: int = 50, warmup: int = 20,
+         compile: bool = True) -> None:
     seq_list = sorted(int(s) for s in str(seqs).split(","))
-    report = run.remote(model, dtype, seq_list, bs, iters, warmup)
+    report = run.remote(model, dtype, seq_list, bs, iters, warmup, compile)
     print("\n===== report =====")
     print(report)
