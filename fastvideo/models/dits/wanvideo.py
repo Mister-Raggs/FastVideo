@@ -28,6 +28,8 @@ from fastvideo.logger import init_logger
 from fastvideo.models.dits.base import BaseDiT
 from fastvideo.platforms import AttentionBackendEnum, current_platform
 from fastvideo.layers.quantization import QuantizationConfig
+from fastvideo.layers.quantization.prequant import (
+    project_with_optional_prequant, supports_prequantized_input)
 
 from fastvideo.distributed.parallel_state import get_sp_world_size
 
@@ -406,9 +408,14 @@ class WanTransformerBlock(nn.Module):
         # 1. Self-attention
         norm_hidden_states = (self.norm1(hidden_states.float()) *
                               (1 + scale_msa) + shift_msa).to(orig_dtype)
-        query, _ = self.to_q(norm_hidden_states)
-        key, _ = self.to_k(norm_hidden_states)
-        value, _ = self.to_v(norm_hidden_states)
+        # q/k/v share the same source, so quantize it once and reuse across the
+        # three projections. No-op for bf16/unquantized linears; on the fp8/fp4
+        # paths it drops 2 redundant activation-quant passes over [tokens, dim].
+        pre_q = (self.to_q.quant_method.quantize_input(norm_hidden_states)
+                 if supports_prequantized_input(self.to_q) else None)
+        query = project_with_optional_prequant(self.to_q, norm_hidden_states, pre_q)
+        key = project_with_optional_prequant(self.to_k, norm_hidden_states, pre_q)
+        value = project_with_optional_prequant(self.to_v, norm_hidden_states, pre_q)
 
         if self.norm_q is not None:
             query = self.norm_q(query)
@@ -556,10 +563,14 @@ class WanTransformerBlock_VSA(nn.Module):
         # 1. Self-attention
         norm_hidden_states = (self.norm1(hidden_states.float()) *
                               (1 + scale_msa) + shift_msa).to(orig_dtype)
-        query, _ = self.to_q(norm_hidden_states)
-        key, _ = self.to_k(norm_hidden_states)
-        value, _ = self.to_v(norm_hidden_states)
-        gate_compress, _ = self.to_gate_compress(norm_hidden_states)
+        # Shared-input quant across the four projections off norm_hidden_states
+        # (no-op unless quantized). See WanTransformerBlock for rationale.
+        pre_q = (self.to_q.quant_method.quantize_input(norm_hidden_states)
+                 if supports_prequantized_input(self.to_q) else None)
+        query = project_with_optional_prequant(self.to_q, norm_hidden_states, pre_q)
+        key = project_with_optional_prequant(self.to_k, norm_hidden_states, pre_q)
+        value = project_with_optional_prequant(self.to_v, norm_hidden_states, pre_q)
+        gate_compress = project_with_optional_prequant(self.to_gate_compress, norm_hidden_states, pre_q)
 
         if self.norm_q is not None:
             query = self.norm_q(query)

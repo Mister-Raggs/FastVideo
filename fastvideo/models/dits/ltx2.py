@@ -30,6 +30,9 @@ from fastvideo.distributed.parallel_state import get_sp_parallel_rank, get_sp_wo
 from fastvideo.forward_context import ForwardContext, get_forward_context, set_forward_context
 from fastvideo.layers.linear import ReplicatedLinear
 from fastvideo.layers.quantization.base_config import QuantizationConfig
+from fastvideo.layers.quantization.prequant import (
+    project_with_optional_prequant as _linear_project_with_optional_prequant,
+    supports_prequantized_input as _supports_prequantized_input)
 from fastvideo.logger import init_logger
 from fastvideo.models.dits.base import BaseDiT
 from fastvideo.platforms import AttentionBackendEnum
@@ -106,48 +109,9 @@ class StageAwareRMSNorm(nn.RMSNorm):
         return super().forward(x).to(x.dtype)
 
 
-def _supports_prequantized_input(linear: ReplicatedLinear) -> bool:
-    """Whether ``linear``'s quant method is willing to accept a
-    pre-quantized ``(x_fp4, x_scale, x_global_sf)`` input tuple.
-
-    Used by the LTX-2 attention forward path so that a single input
-    tensor can be quantized once and reused across q/k/v projections
-    when they share the same source (self-attention).
-    """
-    quant_method = getattr(linear, "quant_method", None)
-    if not callable(getattr(quant_method, "quantize_input", None)):
-        return False
-    wants_prequant = getattr(quant_method, "wants_prequantized_input", None)
-    if callable(wants_prequant):
-        try:
-            return bool(wants_prequant())
-        except Exception:
-            return False
-    return True
-
-
-def _linear_project_with_optional_prequant(
-    linear: ReplicatedLinear,
-    x: torch.Tensor,
-    pre_quantized: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
-) -> torch.Tensor:
-    """Project ``x`` through ``linear``, optionally bypassing the
-    in-method quantize step when ``pre_quantized`` is supplied.
-
-    When the linear's quant method does not support pre-quantized
-    inputs (e.g. ``UnquantizedLinearMethod``), falls back to the
-    standard ``linear(x)`` call and discards the bias-pass-through
-    tuple element.
-    """
-    if pre_quantized is None or not _supports_prequantized_input(linear):
-        return linear(x)[0]
-    bias = linear.bias if not linear.skip_bias_add else None
-    return linear.quant_method.apply(  # type: ignore[union-attr]
-        linear,
-        x,
-        bias=bias,
-        pre_quantized=pre_quantized,
-    )
+# _supports_prequantized_input / _linear_project_with_optional_prequant were
+# hoisted to fastvideo.layers.quantization.prequant (imported above under their
+# original names) so Wan / Cosmos / Kandinsky can share the same helpers.
 
 
 def get_timestep_embedding(
