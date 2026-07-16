@@ -60,8 +60,18 @@ AB_SEED = 42
 MODEL_ID = "KyleShao/Cosmos-Predict2.5-2B-Diffusers"
 
 
+# TEMP until hao-ai-lab/FastVideo#1607 merges: reason1's compute_text_embeddings
+# rejects the BatchEncoding that new transformers 5.x returns from
+# apply_chat_template, so every Cosmos-2.5 run on current main crashes in the
+# text-encoding stage. Cherry-pick the fix commits on top of the A/B ref.
+# Drop this (and the fetch fallback) once the branch rebases past the merge.
+REASON1_FIX_COMMITS = ("bcfa81e4291caa6ab06734e4b098566d21223ad6", "0a6f4ffd93520e4672c5a55f95da939d7a983fab")
+REASON1_FIX_BRANCH = "fix/reason1-batchencoding"
+
+
 def _build_workspace_command(git_repo: str, git_ref: str) -> str:
     import shlex
+    fix_shas = " ".join(REASON1_FIX_COMMITS)
     return f"""
 set -euxo pipefail
 source $HOME/.local/bin/env
@@ -73,6 +83,10 @@ else
   git clone {shlex.quote(git_repo)} /FastVideo && cd /FastVideo
 fi
 git checkout {shlex.quote(git_ref)}
+if ! git merge-base --is-ancestor {REASON1_FIX_COMMITS[0]} HEAD; then
+  git fetch origin {REASON1_FIX_BRANCH} || git fetch origin pull/1607/head
+  git -c user.name=ab -c user.email=ab@local cherry-pick {fix_shas}
+fi
 git submodule update --init --recursive
 uv pip install -e ".[test]"
 cd fastvideo-kernel && ./build.sh && cd ..
