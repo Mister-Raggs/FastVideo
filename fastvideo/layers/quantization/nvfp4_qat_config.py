@@ -95,21 +95,52 @@ class NVFP4QATQuantizeMethod(QuantizeMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
-    def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+    def quantize_input(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Pre-quantize an activation once for reuse across q/k/v projections.
+
+        The static ``x_global_sf`` makes this deterministic, so quantizing here
+        and threading the result through each projection is bit-identical to
+        quantizing inside every ``apply`` — it just skips the redundant passes.
+        The flashinfer quantize is a custom op, so (unlike pure-torch fp8) the
+        sharing is not undone by inductor CSE under ``torch.compile``.
+        """
+        assert x.dtype in (torch.bfloat16, torch.float16), (f"only allow bf16/fp16 inputs to fp4 linear, got {x.dtype}")
+        x_2d = x.view(-1, x.shape[-1])
+        x_fp4, x_scale = _nvfp4_quantize(x_2d, self.x_global_sf, sfLayout=_layout_128x4(), do_shuffle=False)
+        return x_fp4, x_scale, self.x_global_sf
+
+    def wants_prequantized_input(self) -> bool:
+        return True
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        pre_quantized: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
         # ``_fp4_weight`` carries the (out, in/2) packed fp4 weight, so its
         # row count is the output dim even after the dense weight is popped.
         out_dim = layer._fp4_weight.shape[0]
         original_shape = x.shape
 
-        assert x.dtype in (torch.bfloat16, torch.float16), (f"only allow bf16/fp16 inputs to fp4 linear, got {x.dtype}")
-        x = x.view(-1, x.shape[-1])
-        x_global_sf = self.x_global_sf
-        x_fp4, x_scale = _nvfp4_quantize(
-            x,
-            x_global_sf,
-            sfLayout=_layout_128x4(),
-            do_shuffle=False,
-        )
+        if pre_quantized is not None:
+            x_fp4, x_scale, x_global_sf = pre_quantized
+            if x_fp4.dim() > 2:
+                x_fp4 = x_fp4.view(-1, x_fp4.shape[-1])
+            if x_scale.dim() > 2:
+                x_scale = x_scale.view(-1, x_scale.shape[-1])
+        else:
+            assert x.dtype in (torch.bfloat16,
+                               torch.float16), (f"only allow bf16/fp16 inputs to fp4 linear, got {x.dtype}")
+            x = x.view(-1, x.shape[-1])
+            x_global_sf = self.x_global_sf
+            x_fp4, x_scale = _nvfp4_quantize(
+                x,
+                x_global_sf,
+                sfLayout=_layout_128x4(),
+                do_shuffle=False,
+            )
 
         weight_fp4 = layer._fp4_weight
         weight_scale = layer._fp4_weight_scale
