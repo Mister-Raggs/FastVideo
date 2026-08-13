@@ -112,6 +112,7 @@ def block_sparse_attn_triton(
     q2k_idx: torch.Tensor,
     q2k_num: torch.Tensor,
     variable_block_sizes: torch.Tensor,
+    block_size: int = 64,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     from fastvideo_kernel.triton_kernels.block_sparse_attn_triton import (
         triton_block_sparse_attn_forward, )
@@ -123,6 +124,7 @@ def block_sparse_attn_triton(
         q2k_idx,
         q2k_num,
         variable_block_sizes,
+        block_size,
     )
     return o, M
 
@@ -135,6 +137,7 @@ def _block_sparse_attn_triton_fake(
     q2k_idx: torch.Tensor,
     q2k_num: torch.Tensor,
     variable_block_sizes: torch.Tensor,
+    block_size: int = 64,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     o = torch.empty_like(q)
     M = torch.empty(

@@ -16,20 +16,24 @@ import triton.language as tl
 import math  # small utility needed by the sparse wrapper
 # ──────────────────────────── SPARSE ADDITION END ─────────────────────────────
 
-# We don't run auto-tuning every time to keep the tutorial fast. Keeping
-# the code below and commenting out the equivalent parameters is convenient for
-# re-tuning.
+# BLOCK_M / BLOCK_N are NOT tunable. They must equal the block granularity that
+# `q2k_index` / `variable_block_sizes` were built at: the kernel indexes the
+# top-k list as `((b*H + h) * (N_CTX_Q // BLOCK_M) + q_blk)` and addresses keys
+# as `kv_idx * BLOCK_N`. Picking a different tile than the caller's metadata
+# silently reads the wrong list. They previously lived in the autotune Config
+# dict (looking tunable) and only stayed correct because every config was 64 --
+# while the launcher computed its grid from a hardcoded 64. Both now come from
+# the caller, and autotune searches only the scheduling parameters, keyed on the
+# granularity so each one is tuned separately.
 configs = [
-    triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
-    for BM in [64]\
-    for BN in [64]\
-    for s in [3, 4, 7]\
+    triton.Config({}, num_stages=s, num_warps=w) \
+    for s in [2, 3, 4, 5, 6, 7]\
     for w in [4, 8]\
 ]
 
 
 # ──────────────────────────── SPARSE ADDITION BEGIN ───────────────────────────
-@triton.autotune(configs, key=["N_CTX_Q", "HEAD_DIM"])
+@triton.autotune(configs, key=["N_CTX_Q", "HEAD_DIM", "BLOCK_M", "BLOCK_N"])
 @triton.jit
 def _attn_fwd_sparse(
         Q,
@@ -685,22 +689,38 @@ def _attn_bwd_dq_kernel(
 
 
 # ──────────────────────────── SPARSE ADDITION BEGIN ───────────────────────────
-def triton_block_sparse_attn_forward(q, k, v, q2k_index, q2k_num, variable_block_sizes):
+SUPPORTED_TRITON_BLOCK_SIZES = (64, 128)
+
+
+def triton_block_sparse_attn_forward(q, k, v, q2k_index, q2k_num, variable_block_sizes, block_size: int = 64):
+    """Block-sparse attention forward.
+
+    `block_size` is the granularity `q2k_index` / `variable_block_sizes` were
+    built at, and drives BLOCK_M/BLOCK_N and the launch grid together (see the
+    note on `configs`). Callers holding a coarser logical map should expand to
+    the largest supported physical block rather than down to 64: a coarser map
+    expanded 4x along Q gives four consecutive q-tiles identical top-k lists,
+    so the kernel re-loads the same indices and runs 4x the programs for the
+    same work.
+    """
     B, H, Tq, D = q.shape
     Tkv = k.shape[2]
     sm_scale = 1.0 / math.sqrt(D)
     max_kv_blks = q2k_index.shape[-1]
-    assert Tq % 64 == 0, f"q length must be a multiple of 64, but got {Tq}"
-    assert Tkv % 64 == 0, f"kv length must be a multiple of 64, but got {Tkv}"
-    assert q2k_num.shape[
-        -1] == Tq // 64, f"shape mismatch, Tq // 64 = {Tq // 64}, q2k_num.shape[-2] = {q2k_num.shape[-2]}"
-    assert variable_block_sizes.numel() == Tkv // 64, (
-        f"shape mismatch, variable_block_sizes must have length {Tkv // 64}, "
+    assert block_size in SUPPORTED_TRITON_BLOCK_SIZES, (
+        f"block_size must be one of {SUPPORTED_TRITON_BLOCK_SIZES}, got {block_size}")
+    assert Tq % block_size == 0, f"q length must be a multiple of {block_size}, but got {Tq}"
+    assert Tkv % block_size == 0, f"kv length must be a multiple of {block_size}, but got {Tkv}"
+    assert q2k_num.shape[-1] == Tq // block_size, (
+        f"shape mismatch, Tq // {block_size} = {Tq // block_size}, "
+        f"q2k_num.shape[-1] = {q2k_num.shape[-1]}")
+    assert variable_block_sizes.numel() == Tkv // block_size, (
+        f"shape mismatch, variable_block_sizes must have length {Tkv // block_size}, "
         f"got {variable_block_sizes.numel()}")
     o = torch.empty_like(q)
     M = torch.empty((B, H, Tq), dtype=torch.float32, device=q.device)
 
-    grid = lambda _: (triton.cdiv(Tq, 64), B * H, 1)
+    grid = lambda _: (triton.cdiv(Tq, block_size), B * H, 1)
     _attn_fwd_sparse[grid](q,
                            k,
                            v,
@@ -732,6 +752,8 @@ def triton_block_sparse_attn_forward(q, k, v, q2k_index, q2k_num, variable_block
                            Tq,
                            Tkv,
                            HEAD_DIM=D,
+                           BLOCK_M=block_size,
+                           BLOCK_N=block_size,
                            STAGE=3)
 
     return o, M

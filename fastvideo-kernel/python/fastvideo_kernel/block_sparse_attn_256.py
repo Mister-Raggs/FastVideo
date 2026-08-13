@@ -109,7 +109,43 @@ def _triton_via_route_a(
 
     mask_64, sizes_64 = _expand_mask_and_sizes_256_to_64(logical_mask_256, logical_kv_sizes_256)
     q2k_idx, q2k_num = triton_map_to_index(mask_64.to(torch.bool))
-    return block_sparse_attn_triton(q, k, v, q2k_idx, q2k_num, sizes_64)
+    return block_sparse_attn_triton(q, k, v, q2k_idx, q2k_num, sizes_64, _KV_BLOCK_TRITON)
+
+
+def _triton_via_route_b(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    logical_mask_256: torch.Tensor,
+    logical_kv_sizes_256: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Route B: expand the logical 256-map 2x (to 128) instead of 4x (to 64).
+
+    Route A's 4x expansion gives four consecutive q-tiles the *same* top-k
+    list and splits every selected key block into four consecutive entries, so
+    the kernel launches 4x the programs, each re-loading the same indices and
+    walking a 4x longer loop, at 64x64 tiles. The 2x expansion keeps the same
+    selection with half the programs, half the loop length, and 128x128 tiles.
+    It reuses the CuTe path's existing expansion helper -- that path already
+    uses 128-token physical blocks.
+    """
+    from .triton_kernels.index import map_to_index as triton_map_to_index
+
+    mask_128, sizes_128 = _expand_mask_and_sizes_256_to_128(logical_mask_256, logical_kv_sizes_256)
+    # _expand_mask_and_sizes_256_to_128 only splits KV; Q must be split too so
+    # each 128-token q-tile gets its own (identical) list.
+    mask_128 = mask_128.repeat_interleave(2, dim=2)
+    q2k_idx, q2k_num = triton_map_to_index(mask_128.to(torch.bool))
+    return block_sparse_attn_triton(q, k, v, q2k_idx, q2k_num, sizes_128, _KV_BLOCK_PHYS)
+
+
+def _triton_route() -> str:
+    """Which Triton expansion to use for the 256 path.
+
+    Opt-in during evaluation: route A stays the default so this cannot change
+    numerics for anyone until it is measured on more than one architecture.
+    """
+    return os.environ.get("FASTVIDEO_VSA_TRITON_ROUTE", "a").strip().lower()
 
 
 def block_sparse_attn_256(
@@ -124,7 +160,8 @@ def block_sparse_attn_256(
         logical_block_map_256 = logical_block_map_256.unsqueeze(0)
 
     if _resolve_backend() == "triton":
-        return _triton_via_route_a(q, k, v, logical_block_map_256, logical_variable_block_sizes_256)
+        route = _triton_via_route_b if _triton_route() == "b" else _triton_via_route_a
+        return route(q, k, v, logical_block_map_256, logical_variable_block_sizes_256)
 
     mask_128, sizes_128 = _expand_mask_and_sizes_256_to_128(logical_block_map_256, logical_variable_block_sizes_256)
     from .block_sparse_attn_cute_fwd import block_sparse_attn_cute_fwd
@@ -147,7 +184,8 @@ def block_sparse_attn_256_bshd(
         logical_block_map_256 = logical_block_map_256.unsqueeze(0)
 
     if _resolve_backend() == "triton":
-        out_bhsd, aux = _triton_via_route_a(
+        route = _triton_via_route_b if _triton_route() == "b" else _triton_via_route_a
+        out_bhsd, aux = route(
             q.transpose(1, 2).contiguous(),
             k.transpose(1, 2).contiguous(),
             v.transpose(1, 2).contiguous(),
