@@ -133,3 +133,55 @@ def test_routes_agree_numerically_on_gpu(seq_blocks):
             os.environ["FASTVIDEO_VSA_TRITON_ROUTE"] = prev
 
     torch.testing.assert_close(out_a.float(), out_b.float(), rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA + built fastvideo-kernel")
+def test_route_a_autograd_still_works():
+    """The default (64) route must keep its backward.
+
+    Regression guard: `block_size` was added as a seventh input to the
+    `block_sparse_attn_triton` custom op, and the autograd `setup_context` /
+    backward unpack that input list positionally. Forward-only tests do not
+    exercise them, so this asserts the gradient path end to end.
+    """
+    from fastvideo_kernel.block_sparse_attn import block_sparse_attn_triton
+    from fastvideo_kernel.triton_kernels.index import map_to_index
+
+    dev = torch.device("cuda")
+    n_qb = n_kvb = 4
+    mask = torch.ones(1, 2, n_qb, n_kvb, dtype=torch.bool, device=dev)
+    sizes = torch.full((n_kvb, ), _KV_BLOCK_TRITON, dtype=torch.int32, device=dev)
+    q2k_idx, q2k_num = map_to_index(mask)
+
+    seq = n_qb * _KV_BLOCK_TRITON
+    q, k, v = (torch.randn(1, 2, seq, 128, device=dev, dtype=torch.bfloat16, requires_grad=True) for _ in range(3))
+    o, _ = block_sparse_attn_triton(q, k, v, q2k_idx, q2k_num, sizes, _KV_BLOCK_TRITON)
+    o.sum().backward()
+
+    for name, t in (("q", q), ("k", k), ("v", v)):
+        assert t.grad is not None, f"no gradient for {name}"
+        assert torch.isfinite(t.grad).all(), f"non-finite gradient for {name}"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA + built fastvideo-kernel")
+def test_route_b_backward_refuses_rather_than_degrades():
+    """128-granularity backward must raise, not silently use the 64 kernels.
+
+    The backward kernels hardcode 32/64/64/32 tiles and derive their grids from
+    those, so running them against 128-granularity metadata would read the wrong
+    top-k lists and return plausible-looking wrong gradients.
+    """
+    from fastvideo_kernel.block_sparse_attn import block_sparse_attn_triton
+    from fastvideo_kernel.triton_kernels.index import map_to_index
+
+    dev = torch.device("cuda")
+    n_qb = n_kvb = 4
+    mask = torch.ones(1, 2, n_qb, n_kvb, dtype=torch.bool, device=dev)
+    sizes = torch.full((n_kvb, ), _KV_BLOCK_PHYS, dtype=torch.int32, device=dev)
+    q2k_idx, q2k_num = map_to_index(mask)
+
+    seq = n_qb * _KV_BLOCK_PHYS
+    q, k, v = (torch.randn(1, 2, seq, 128, device=dev, dtype=torch.bfloat16, requires_grad=True) for _ in range(3))
+    o, _ = block_sparse_attn_triton(q, k, v, q2k_idx, q2k_num, sizes, _KV_BLOCK_PHYS)
+    with pytest.raises(NotImplementedError, match="block_size=64 only"):
+        o.sum().backward()

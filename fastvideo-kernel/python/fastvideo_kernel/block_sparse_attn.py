@@ -206,15 +206,26 @@ def _block_sparse_attn_backward_triton_fake(
 
 
 def _setup_context_triton(ctx, inputs, output):
-    q, k, v, q2k_idx, q2k_num, variable_block_sizes = inputs
+    q, k, v, q2k_idx, q2k_num, variable_block_sizes, block_size = inputs
     o, M = output
+    ctx.block_size = block_size
     ctx.save_for_backward(q, k, v, o, M, q2k_idx, q2k_num, variable_block_sizes)
 
 
 def _backward_triton(ctx, grad_o, grad_M):
+    # The backward kernels are structurally 64-granularity: they hardcode
+    # BLOCK_M1/BLOCK_N1/BLOCK_M2/BLOCK_N2 = 32/64/64/32 and derive their grids
+    # from those. Running them against metadata built at another granularity
+    # would read the wrong top-k lists and silently return wrong gradients, so
+    # refuse rather than degrade. Forward-only callers (the 128 route) never
+    # reach here; wiring the backward is a separate change.
+    if ctx.block_size != 64:
+        raise NotImplementedError(
+            f"block_sparse_attn_triton backward supports block_size=64 only, got {ctx.block_size}. "
+            "The 128-granularity path is forward-only; use block_size=64 if you need gradients.")
     q, k, v, o, M, q2k_idx, q2k_num, variable_block_sizes = ctx.saved_tensors
     dq, dk, dv = block_sparse_attn_backward_triton(grad_o, q, k, v, o, M, q2k_idx, q2k_num, variable_block_sizes)
-    return dq, dk, dv, None, None, None
+    return dq, dk, dv, None, None, None, None
 
 
 block_sparse_attn_triton.register_autograd(_backward_triton, setup_context=_setup_context_triton)
