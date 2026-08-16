@@ -39,7 +39,24 @@ from fastvideo.logger import init_logger
 
 logger = init_logger(__name__)
 
-_CAUSAL_ATTN_CLS = "CausalWanSelfAttention"
+# Causal self-attention wrappers differ per model family -- CausalWanSelfAttention
+# (Wan/SFWan), CausalMatrixGame2SelfAttention (Matrix-Game 2),
+# DreamXPropeSelfAttention (DreamX-World) -- so match structurally instead of by
+# name: a self-attention module that delegates to a LocalAttention child. Cross
+# attention is excluded by name. Override with FASTVIDEO_KV_PROBE_CLS (comma
+# separated) if the heuristic misses.
+_LOCAL_ATTN_CLS = "LocalAttention"
+
+
+def _is_causal_self_attn(module: nn.Module) -> bool:
+    override = os.getenv("FASTVIDEO_KV_PROBE_CLS", "").strip()
+    if override:
+        return type(module).__name__ in {s.strip() for s in override.split(",") if s.strip()}
+    cls = type(module).__name__
+    if "SelfAttention" not in cls or "Cross" in cls:
+        return False
+    inner = getattr(module, "attn", None)
+    return isinstance(inner, nn.Module) and type(inner).__name__ == _LOCAL_ATTN_CLS
 
 
 def _enabled() -> bool:
@@ -220,7 +237,7 @@ def attach_kv_probe(model: nn.Module | None) -> KVProbeManager | None:
 
     idx = 0
     for name, module in model.named_modules():
-        if type(module).__name__ != _CAUSAL_ATTN_CLS:
+        if not _is_causal_self_attn(module):
             continue
         inner = getattr(module, "attn", None)
         if not isinstance(inner, nn.Module):
@@ -236,7 +253,8 @@ def attach_kv_probe(model: nn.Module | None) -> KVProbeManager | None:
         idx += 1
 
     if not managers:
-        logger.warning("FASTVIDEO_KV_PROBE=1 but no %s modules found -- not a causal model?", _CAUSAL_ATTN_CLS)
+        logger.warning("FASTVIDEO_KV_PROBE=1 but no causal self-attention modules found -- "
+                       "not a causal model, or the matcher missed (try FASTVIDEO_KV_PROBE_CLS)")
         return None
 
     mgr = KVProbeManager(managers, store, _output_path())
