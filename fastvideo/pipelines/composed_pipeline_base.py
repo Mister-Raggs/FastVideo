@@ -17,6 +17,7 @@ from fastvideo.distributed import (maybe_init_distributed_environment_and_model_
 from fastvideo.distributed.communication_op import (warmup_sequence_parallel_communication)
 from fastvideo.fastvideo_args import FastVideoArgs, TrainingArgs
 from fastvideo.hooks.activation_trace import attach_activation_trace, detach_activation_trace
+from fastvideo.hooks.kv_probe import attach_kv_probe
 from fastvideo.logger import init_logger
 from fastvideo.profiler import get_or_create_profiler
 from fastvideo.models.loader.component_loader import PipelineComponentLoader
@@ -251,6 +252,8 @@ class ComposedPipelineBase(ABC):
                     logger.info("Torch Compile enabled for audio VAE")
 
         self._trace_mgr = attach_activation_trace(self.modules.get("transformer"))
+        # D1 Phase-A instrumentation; no-op unless FASTVIDEO_KV_PROBE=1
+        self._kv_probe_mgr = attach_kv_probe(self.modules.get("transformer"))
 
         if not self.fastvideo_args.training_mode:
             logger.info("Creating pipeline stages...")
