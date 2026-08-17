@@ -36,6 +36,19 @@ IMAGE = ("https://raw.githubusercontent.com/SkyworkAI/Matrix-Game/main/"
 KEYBOARD_DIM = 4
 
 
+def _extract_peak_mb(result) -> float | None:
+    """Peak memory as measured IN THE WORKER, from whatever shape it comes back in."""
+    if isinstance(result, dict):
+        return result.get("peak_memory_mb")
+    for attr in ("peak_memory_mb", "extra"):
+        val = getattr(result, attr, None)
+        if isinstance(val, dict):
+            return val.get("peak_memory_mb")
+        if val is not None:
+            return val
+    return None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--num-frames", type=int, default=597)
@@ -70,10 +83,8 @@ def main() -> None:
     actions = create_action_presets(args.num_frames, keyboard_dim=KEYBOARD_DIM, seed=args.action_seed)
     grid_sizes = torch.tensor([latent, 44, 80])
 
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
     t0 = time.perf_counter()
-    generator.generate_video(
+    result = generator.generate_video(
         prompt="",
         image_path=IMAGE,
         mouse_cond=actions["mouse"].unsqueeze(0),
@@ -97,7 +108,10 @@ def main() -> None:
         "seed": args.seed,
         "action_seed": args.action_seed,
         "gen_s": round(gen_s, 2),
-        "peak_mem_gib": (round(torch.cuda.max_memory_allocated() / (1024**3), 3) if torch.cuda.is_available() else None),
+        # MUST come from the returned result: generation runs in a spawned
+        # worker, so torch.cuda.max_memory_allocated() in THIS process reads a
+        # cold allocator and reports 0.0.
+        "peak_memory_mb": _extract_peak_mb(result),
     }
     with open(os.path.join(outdir, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
