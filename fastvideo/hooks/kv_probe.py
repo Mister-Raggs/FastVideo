@@ -314,19 +314,45 @@ def apply_kv_window_override(model: nn.Module | None) -> int | None:
     No-op unless FASTVIDEO_KV_WINDOW is set. Returns the applied value.
     """
     raw = os.getenv("FASTVIDEO_KV_WINDOW", "").strip()
-    if not raw or model is None:
+    sink_raw = os.getenv("FASTVIDEO_KV_SINK", "").strip()
+    if (not raw and not sink_raw) or model is None:
         return None
-    try:
-        window = int(raw)
-    except ValueError:
-        logger.warning("FASTVIDEO_KV_WINDOW=%r is not an int; ignoring", raw)
-        return None
+
+    window = None
+    if raw:
+        try:
+            window = int(raw)
+        except ValueError:
+            logger.warning("FASTVIDEO_KV_WINDOW=%r is not an int; ignoring", raw)
+
+    # Attention sinks come OUT of the window budget: retain_kv_with_sink keeps
+    # sink_len anchor tokens + (target_len - sink_len) recent ones. So
+    # window=5,sink=1 attends the same 5 frames as window=5,sink=0 -- one is the
+    # first frame instead of the fifth-most-recent. Byte-for-byte identical,
+    # only the composition differs. Matrix-Game ships sink_size=0 while
+    # DreamX-World uses 3 and LingBot-World 2 uses 6.
+    sink = None
+    if sink_raw:
+        try:
+            sink = int(sink_raw)
+        except ValueError:
+            logger.warning("FASTVIDEO_KV_SINK=%r is not an int; ignoring", sink_raw)
 
     touched = 0
     for _, module in model.named_modules():
-        if _is_causal_self_attn(module) and hasattr(module, "local_attn_size"):
+        if not _is_causal_self_attn(module):
+            continue
+        if window is not None and hasattr(module, "local_attn_size"):
             module.local_attn_size = window
             touched += 1
+        if sink is not None and hasattr(module, "sink_size"):
+            module.sink_size = sink
+    if sink is not None:
+        logger.warning(
+            "FASTVIDEO_KV_SINK=%d applied -- sinks are taken FROM the window budget, "
+            "so total KV is unchanged. THIS CHANGES OUTPUT.", sink)
+    if window is None:
+        return sink
     # the denoising stages read it off the transformer itself, and off the arch
     # config, so set both or the cache buffers keep the old size
     if hasattr(model, "local_attn_size"):
