@@ -15,19 +15,24 @@ Run this before writing any quantizer:
     FASTVIDEO_KV_MEM_PROBE_OUTPUT=$HOME/kvquant/step0_sfwan21.json \
         python examples/inference/optimizations/kvquant_mem_probe.py
 
-Model/frames are overridable:
+Knobs:
 
     FV_KVQ_MODEL=...  FV_KVQ_FRAMES=81  FV_KVQ_OUTPUT_DIR=...
+    FV_KVQ_VAE_TILING=1|0   enable/disable VAE tiling (Wan configs ship it OFF)
+    FV_KVQ_NO_OFFLOAD=1     pin every module resident (the all-resident arm)
 
-Generation settings mirror ``basic_self_forcing_causal.py`` (offload off, single
-GPU) so the measurement describes the path a single-GPU user actually runs;
-enabling offload moves weights off the device and changes the peak composition.
+Offload is left at FastVideo's defaults (all True) unless FV_KVQ_NO_OFFLOAD is
+set. The first run of this probe mirrored basic_self_forcing_causal.py, which
+disables text-encoder and DiT offload -- that pinned ~21.7 GiB of weights
+resident and measured the least favourable configuration for the KV question.
+Defaults describe the path a commodity-GPU user actually runs.
 """
 
 import os
 import time
 
 from fastvideo import SamplingParam, VideoGenerator
+from fastvideo.configs.pipelines import PipelineConfig
 
 DEFAULT_MODEL = "wlsaidhi/SFWan2.1-T2V-1.3B-Diffusers"
 
@@ -45,12 +50,23 @@ def main() -> None:
     model_name = os.getenv("FV_KVQ_MODEL", DEFAULT_MODEL)
     output_dir = os.getenv("FV_KVQ_OUTPUT_DIR", "video_samples_kvquant_step0")
 
+    pipeline_config = PipelineConfig.from_pretrained(model_name)
+    tiling = os.getenv("FV_KVQ_VAE_TILING")
+    if tiling is not None:
+        # Wan configs override the base default to False, so SFWan decodes all
+        # frames in one shot -- that untiled transient is what owns peak memory.
+        pipeline_config.vae_tiling = tiling != "0"
+
+    kwargs: dict[str, object] = {}
+    if os.getenv("FV_KVQ_NO_OFFLOAD", "0") != "0":
+        kwargs.update(text_encoder_cpu_offload=False, dit_cpu_offload=False, dit_layerwise_offload=False)
+
     generator = VideoGenerator.from_pretrained(
         model_name,
         num_gpus=1,
         use_fsdp_inference=False,
-        text_encoder_cpu_offload=False,
-        dit_cpu_offload=False,
+        pipeline_config=pipeline_config,
+        **kwargs,
     )
 
     sampling_param = SamplingParam.from_pretrained(model_name)
@@ -59,7 +75,8 @@ def main() -> None:
         sampling_param.num_frames = int(frames)
     sampling_param.seed = 42
 
-    print(f"[step0] model={model_name} num_frames={sampling_param.num_frames} seed={sampling_param.seed}")
+    print(f"[step0] model={model_name} num_frames={sampling_param.num_frames} seed={sampling_param.seed} "
+          f"vae_tiling={pipeline_config.vae_tiling} no_offload={bool(kwargs)}")
 
     start = time.perf_counter()
     generator.generate_video(PROMPT, output_path=output_dir, save_video=True, sampling_param=sampling_param)
