@@ -56,7 +56,20 @@ def _is_causal_self_attn(module: nn.Module) -> bool:
     if "SelfAttention" not in cls or "Cross" in cls:
         return False
     inner = getattr(module, "attn", None)
-    return isinstance(inner, nn.Module) and type(inner).__name__ == _LOCAL_ATTN_CLS
+    if isinstance(inner, nn.Module) and type(inner).__name__ == _LOCAL_ATTN_CLS:
+        return True
+    # Windowed AR models (Matrix-Game 2, LingBot-World 2, DreamX-World AR) do NOT
+    # route through LocalAttention -- they call F.scaled_dot_product_attention
+    # directly -- so identify them by the window attributes instead.
+    return hasattr(module, "local_attn_size") or hasattr(module, "sink_size")
+
+
+# Set by KVProbeScopeHook while control is inside a causal self-attention forward.
+# Single-threaded inference, so a module-level slot is sufficient. The inner
+# LocalAttention hook and the patched SDPA both consult it, and whichever fires
+# first for a given call records ("done"), so a model that has BOTH paths is not
+# counted twice.
+_CURRENT: dict[str, Any] | None = None
 
 
 def _enabled() -> bool:
@@ -97,9 +110,11 @@ class KVProbeHook(ForwardHook):
         self.store = store
 
     def pre_forward(self, module: nn.Module, *args: Any, **kwargs: Any) -> tuple[tuple[Any, ...], dict[str, Any]]:
-        if len(args) >= 2:
+        cur = _CURRENT
+        if len(args) >= 2 and cur is not None and not cur["done"]:
             try:
                 self._record(args[0], args[1])
+                cur["done"] = True
             except Exception as exc:  # a statistic must never break generation
                 rec = self.store.setdefault(self.layer_idx, {})
                 rec.setdefault("errors", []).append(repr(exc)[:200])
@@ -168,18 +183,84 @@ class KVProbeHook(ForwardHook):
         rec["stat_calls"] += 1
 
 
+class KVProbeScopeHook(ForwardHook):
+    """Attached to the causal self-attention module itself.
+
+    Marks "we are inside layer N's self-attention" so that the inner
+    LocalAttention hook -- or, for models that bypass it and call
+    F.scaled_dot_product_attention directly, the patched SDPA -- knows which
+    layer it belongs to. Records nothing on its own.
+    """
+
+    @classmethod
+    def name(cls) -> str:
+        return "KVProbeScopeHook"
+
+    def __init__(self, layer_idx: int, hook: KVProbeHook) -> None:
+        self.layer_idx = layer_idx
+        self.hook = hook
+
+    def pre_forward(self, module: nn.Module, *args: Any, **kwargs: Any) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        global _CURRENT
+        _CURRENT = {"hook": self.hook, "done": False}
+        return args, kwargs
+
+    def post_forward(self, module: nn.Module, output: Any) -> Any:
+        global _CURRENT
+        _CURRENT = None
+        return output
+
+
+def _install_sdpa_capture() -> Any:
+    """Patch F.scaled_dot_product_attention to record inside hooked scopes.
+
+    Matrix-Game 2 (`causal_model.py`), LingBot-World 2 (`causal_fast.py`) and
+    DreamX-World AR (`dreamx_world_ar.py`) all bypass FastVideo's attention layer
+    and call SDPA directly -- Matrix-Game even constructs a LocalAttention it
+    never calls. They resolve the symbol at call time, so patching the attribute
+    catches all of them.
+
+    SDPA takes [B, H, L, D]; the recorder wants [B, L, H, D].
+    """
+    import torch.nn.functional as F
+    orig = F.scaled_dot_product_attention
+
+    def wrapped(query, key, value, *args: Any, **kwargs: Any):
+        cur = _CURRENT
+        if cur is not None and not cur["done"]:
+            try:
+                if isinstance(query, torch.Tensor) and query.ndim == 4:
+                    cur["hook"]._record(query.transpose(1, 2), key.transpose(1, 2))
+                    cur["done"] = True
+            except Exception as exc:
+                rec = cur["hook"].store.setdefault(cur["hook"].layer_idx, {})
+                rec.setdefault("errors", []).append(repr(exc)[:200])
+        return orig(query, key, value, *args, **kwargs)
+
+    F.scaled_dot_product_attention = wrapped
+    return orig
+
+
 class KVProbeManager:
 
-    def __init__(self, managers: list[ModuleHookManager], store: dict[int, dict], path: Path) -> None:
+    def __init__(self,
+                 managers: list[ModuleHookManager],
+                 store: dict[int, dict],
+                 path: Path,
+                 sdpa_orig: Any = None) -> None:
         self.managers = managers
         self.store = store
         self.path = path
+        self.sdpa_orig = sdpa_orig
         self._dumped = False
 
     def dump(self) -> None:
         if self._dumped:
             return
         self._dumped = True
+        if self.sdpa_orig is not None:
+            import torch.nn.functional as F
+            F.scaled_dot_product_attention = self.sdpa_orig
         layers = []
         total_bytes = 0
         for idx in sorted(self.store):
@@ -236,20 +317,32 @@ def attach_kv_probe(model: nn.Module | None) -> KVProbeManager | None:
     managers: list[ModuleHookManager] = []
 
     idx = 0
+    n_local, n_sdpa = 0, 0
     for name, module in model.named_modules():
         if not _is_causal_self_attn(module):
-            continue
-        inner = getattr(module, "attn", None)
-        if not isinstance(inner, nn.Module):
             continue
         local_attn_size = int(getattr(module, "local_attn_size", -1) or -1)
         sink_size = int(getattr(module, "sink_size", 0) or 0)
         sink_frac = (sink_size / local_attn_size) if local_attn_size > 0 else 0.0
         layer_cfg = dict(cfg, local_attn_size=local_attn_size, sink_size=sink_size)
+        hook = KVProbeHook(name, idx, sink_frac, layer_cfg, store)
 
-        manager = ModuleHookManager.get_from_or_default(inner)
-        manager.append_forward_hook(KVProbeHook(f"{name}.attn", idx, sink_frac, layer_cfg, store))
-        managers.append(manager)
+        # Scope hook on the module itself: needed by BOTH capture paths.
+        scope_mgr = ModuleHookManager.get_from_or_default(module)
+        scope_mgr.append_forward_hook(KVProbeScopeHook(idx, hook))
+        managers.append(scope_mgr)
+
+        # If this family routes through LocalAttention, hook it too -- it sees
+        # the exact (q, key_window, value_window). Models that bypass it are
+        # covered by the SDPA capture instead.
+        inner = getattr(module, "attn", None)
+        if isinstance(inner, nn.Module) and type(inner).__name__ == _LOCAL_ATTN_CLS:
+            inner_mgr = ModuleHookManager.get_from_or_default(inner)
+            inner_mgr.append_forward_hook(hook)
+            managers.append(inner_mgr)
+            n_local += 1
+        else:
+            n_sdpa += 1
         idx += 1
 
     if not managers:
@@ -257,7 +350,9 @@ def attach_kv_probe(model: nn.Module | None) -> KVProbeManager | None:
                        "not a causal model, or the matcher missed (try FASTVIDEO_KV_PROBE_CLS)")
         return None
 
-    mgr = KVProbeManager(managers, store, _output_path())
+    sdpa_orig = _install_sdpa_capture()
+    mgr = KVProbeManager(managers, store, _output_path(), sdpa_orig)
+    logger.info("KV probe: %d layers via LocalAttention, %d via raw-SDPA capture", n_local, n_sdpa)
     atexit.register(mgr.dump)
     logger.info("KV probe attached to %d causal attention layers (cfg=%s)", len(managers), cfg)
     return mgr
