@@ -52,6 +52,12 @@ REFERENCE_STEPS = 50
 # Cost of the 3-step draft, in units of full-Wan steps (13.1 vs ~5.5 s/step).
 DRAFT_COST_IN_VERIFIER_STEPS = 1.3
 
+# FastWan ships VSA-trained gate weights and is meant to run with VSA; the
+# verifier (stock Wan) is dense. That asymmetry is not a confound -- the draft
+# under test IS the distilled model as shipped -- but every verifier step in
+# both arms is dense, so the arms stay comparable.
+DRAFT_VSA_SPARSITY = 0.8
+
 STRENGTHS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.7]
 
 PROMPT = ("A curious raccoon peers through a vibrant field of yellow sunflowers, its eyes "
@@ -68,24 +74,56 @@ def _sampling_param(model: str, steps: int | None = None) -> SamplingParam:
     return param
 
 
-def _generator(model: str, output_type: str = "pil") -> VideoGenerator:
-    # Offload left at FastVideo defaults.
-    return VideoGenerator.from_pretrained(model, num_gpus=1, use_fsdp_inference=False, output_type=output_type)
+def _generator(model: str, output_type: str = "pil", vsa_sparsity: float | None = None) -> VideoGenerator:
+    """Build a generator. Offload is left at FastVideo defaults.
+
+    FastWan checkpoints ship VSA gate weights (``to_gate_compress``), and the
+    attention backend must be selected BEFORE the transformer is built --
+    otherwise the DiT is constructed gateless and loading dies with
+    "Parameter blocks.0.to_gate_compress.bias not found in custom model state
+    dict". This mirrors examples/inference/basic/basic_dmd.py.
+    """
+    kwargs = {}
+    if vsa_sparsity is not None:
+        os.environ["FASTVIDEO_ATTENTION_BACKEND"] = "VIDEO_SPARSE_ATTN"
+        kwargs["VSA_sparsity"] = vsa_sparsity
+    else:
+        # Each phase runs in its own process, but stay explicit: the dense
+        # verifier must not inherit a VSA backend selection.
+        os.environ.pop("FASTVIDEO_ATTENTION_BACKEND", None)
+    return VideoGenerator.from_pretrained(model,
+                                          num_gpus=1,
+                                          use_fsdp_inference=False,
+                                          output_type=output_type,
+                                          **kwargs)
 
 
 def _latent_from_result(result) -> torch.Tensor:
-    samples = result["samples"] if isinstance(result, dict) else result.samples
-    if isinstance(samples, list):
-        samples = samples[0]
-    return samples.detach().cpu()
+    """Mirrors fastvideo/tests/ssim/latent_similarity_utils._extract_latent_from_result."""
+    if not isinstance(result, dict):
+        raise RuntimeError(f"generate_video returned {type(result)!r}; expected dict with 'samples'")
+    samples = result.get("samples")
+    if samples is None:
+        raise RuntimeError("No latent samples returned. output_type='latent' requires return_frames=True.")
+    latent = samples.detach().to(torch.float32).cpu()
+    if latent.dim() != 5:
+        raise RuntimeError(f"Expected a 5-D (B,C,T,H,W) video latent; got {tuple(latent.shape)}")
+    return latent
+
+
+def _generate(gen: VideoGenerator, param: SamplingParam, **extra):
+    # return_frames=True is REQUIRED alongside output_type='latent' -- without
+    # it the pipeline skips the samples buffer and `samples` comes back None,
+    # but only after paying the full generation cost.
+    return gen.generate_video(PROMPT, sampling_param=param, save_video=False, return_frames=True, **extra)
 
 
 def cmd_draft(out: Path) -> None:
     """FastWan 3 steps -> x0_hat. Its own config supplies the DMD schedule."""
-    gen = _generator(DRAFT_MODEL, output_type="latent")
+    gen = _generator(DRAFT_MODEL, output_type="latent", vsa_sparsity=DRAFT_VSA_SPARSITY)
     param = _sampling_param(DRAFT_MODEL)
     start = time.perf_counter()
-    result = gen.generate_video(PROMPT, sampling_param=param, save_video=False, return_frames=False)
+    result = _generate(gen, param)
     wall = time.perf_counter() - start
 
     latent = _latent_from_result(result)
@@ -97,7 +135,7 @@ def cmd_reference(out: Path) -> None:
     gen = _generator(VERIFIER_MODEL, output_type="latent")
     param = _sampling_param(VERIFIER_MODEL, steps=REFERENCE_STEPS)
     start = time.perf_counter()
-    result = gen.generate_video(PROMPT, sampling_param=param, save_video=False, return_frames=False)
+    result = _generate(gen, param)
     wall = time.perf_counter() - start
 
     latent = _latent_from_result(result)
@@ -121,16 +159,10 @@ def cmd_sweep(out: Path) -> None:
         # Arm A: start from the draft's x0_hat, run only the schedule tail.
         param = _sampling_param(VERIFIER_MODEL, steps=REFERENCE_STEPS)
         start = time.perf_counter()
-        result = gen.generate_video(
-            PROMPT,
-            sampling_param=param,
-            save_video=False,
-            return_frames=False,
-            _extra_overrides={
-                "denoise_strength": strength,
-                "init_latents": draft_latent,
-            },
-        )
+        result = _generate(gen, param, _extra_overrides={
+            "denoise_strength": strength,
+            "init_latents": draft_latent,
+        })
         wall_a = time.perf_counter() - start
         torch.save(_latent_from_result(result), out / f"arm_draftinit_s{strength:.2f}.pt")
 
@@ -139,7 +171,7 @@ def cmd_sweep(out: Path) -> None:
         control_steps = max(1, round(n_full + DRAFT_COST_IN_VERIFIER_STEPS))
         param_b = _sampling_param(VERIFIER_MODEL, steps=control_steps)
         start = time.perf_counter()
-        result_b = gen.generate_video(PROMPT, sampling_param=param_b, save_video=False, return_frames=False)
+        result_b = _generate(gen, param_b)
         wall_b = time.perf_counter() - start
         torch.save(_latent_from_result(result_b), out / f"arm_control_s{strength:.2f}.pt")
 
