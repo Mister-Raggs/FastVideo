@@ -268,14 +268,28 @@ class MatrixGame2CausalDenoisingStage(DenoisingStage):
         else:
             kv_cache_size = self.frame_seq_length * self.sliding_window_num_frames
 
-        for _ in range(self.num_transformer_blocks):
+        # D1/S2: a per-layer budget plan sizes each layer's buffer individually.
+        # The buffer bounds the rolling cache and local_attn_size bounds the
+        # attention window, so both must agree or the window cannot be filled.
+        # Absent a plan this is exactly the old uniform behaviour.
+        budget_plan = getattr(self.transformer, "_kv_budget_plan", None)
+        if budget_plan is not None and len(budget_plan) != self.num_transformer_blocks:
+            logger.warning("KV budget plan has %d entries but there are %d blocks -- ignoring plan", len(budget_plan),
+                           self.num_transformer_blocks)
+            budget_plan = None
+        if budget_plan is not None:
+            logger.info("KV budget plan active: per-layer cache sizes %s frame-units", budget_plan)
+
+        for block_idx in range(self.num_transformer_blocks):
+            layer_cache_size = (budget_plan[block_idx] *
+                                self.frame_seq_length if budget_plan is not None else kv_cache_size)
             kv_cache.append({
                 "k":
-                torch.zeros([batch_size, kv_cache_size, num_attention_heads, attention_head_dim],
+                torch.zeros([batch_size, layer_cache_size, num_attention_heads, attention_head_dim],
                             dtype=dtype,
                             device=device),
                 "v":
-                torch.zeros([batch_size, kv_cache_size, num_attention_heads, attention_head_dim],
+                torch.zeros([batch_size, layer_cache_size, num_attention_heads, attention_head_dim],
                             dtype=dtype,
                             device=device),
                 "global_end_index":

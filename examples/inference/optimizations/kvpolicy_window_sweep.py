@@ -59,7 +59,15 @@ def main() -> None:
     args = ap.parse_args()
 
     window = os.getenv("FASTVIDEO_KV_WINDOW", "default")
-    label = f"w{window}" + (f"_{args.tag}" if args.tag else "")
+    # a per-layer budget plan overrides the uniform window, so label by the plan
+    # when one is set -- otherwise every plan run collides on the same directory
+    plan_layers = os.getenv("FASTVIDEO_KV_BUDGET_LAYERS", "").strip()
+    if plan_layers:
+        label = "plan{}-{}".format(os.getenv("FASTVIDEO_KV_BUDGET_LONG", "12"), os.getenv("FASTVIDEO_KV_BUDGET_SHORT",
+                                                                                          "4"))
+    else:
+        label = f"w{window}"
+    label += f"_{args.tag}" if args.tag else ""
     outdir = os.path.join(args.outdir, label)
     os.makedirs(outdir, exist_ok=True)
 
@@ -102,6 +110,9 @@ def main() -> None:
 
     meta = {
         "kv_window": window,
+        "budget_layers": plan_layers or None,
+        "budget_long": os.getenv("FASTVIDEO_KV_BUDGET_LONG") if plan_layers else None,
+        "budget_short": os.getenv("FASTVIDEO_KV_BUDGET_SHORT") if plan_layers else None,
         "tag": args.tag,
         "num_frames": args.num_frames,
         "latent_frames": latent,
