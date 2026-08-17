@@ -43,7 +43,7 @@ def _batch(num_steps: int = 50, shape=(1, 16, 3, 8, 8)):
 
 
 def test_reads_from_batch_extra_escape_hatch():
-    """Callers can drive the stage via generate_video(_extra_overrides=...)."""
+    """Callers drive the stage via the _BATCH_EXTRA_PASSTHROUGH_KEYS route."""
     scheduler, batch = _batch(num_steps=50)
     init = torch.randn_like(batch.latents)
     batch.extra["denoise_strength"] = 0.4

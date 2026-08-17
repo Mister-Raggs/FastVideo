@@ -40,6 +40,9 @@ def test_passthrough_keys_cover_ltx2_audio_conditioning() -> None:
         "vsa_mode",
         "vsa_dense_first_n_steps",
         "vsa_dense_layers",
+        # Partial-denoise entry (consumed by PartialDenoiseStage)
+        "denoise_strength",
+        "init_latents",
     }
     assert set(_BATCH_EXTRA_PASSTHROUGH_KEYS) == expected
 

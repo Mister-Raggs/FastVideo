@@ -76,6 +76,10 @@ _BATCH_EXTRA_PASSTHROUGH_KEYS: tuple[str, ...] = (
     "vsa_mode",
     "vsa_dense_first_n_steps",
     "vsa_dense_layers",
+    # Partial-denoise entry (read by PartialDenoiseStage): start from a
+    # supplied latent partway down the schedule instead of from pure noise.
+    "denoise_strength",
+    "init_latents",
 )
 
 _FROM_PRETRAINED_CONVENIENCE_KWARGS = frozenset({

@@ -159,10 +159,7 @@ def cmd_sweep(out: Path) -> None:
         # Arm A: start from the draft's x0_hat, run only the schedule tail.
         param = _sampling_param(VERIFIER_MODEL, steps=REFERENCE_STEPS)
         start = time.perf_counter()
-        result = _generate(gen, param, _extra_overrides={
-            "denoise_strength": strength,
-            "init_latents": draft_latent,
-        })
+        result = _generate(gen, param, denoise_strength=strength, init_latents=draft_latent)
         wall_a = time.perf_counter() - start
         torch.save(_latent_from_result(result), out / f"arm_draftinit_s{strength:.2f}.pt")
 
