@@ -11,7 +11,8 @@ from fastvideo.logger import init_logger
 from fastvideo.models.schedulers.scheduling_flow_unipc_multistep import (FlowUniPCMultistepScheduler)
 from fastvideo.pipelines import ComposedPipelineBase, LoRAPipeline
 from fastvideo.pipelines.stages import (ConditioningStage, DecodingStage, DenoisingStage, InputValidationStage,
-                                        LatentPreparationStage, TextEncodingStage, TimestepPreparationStage)
+                                        LatentPreparationStage, PartialDenoiseStage, TextEncodingStage,
+                                        TimestepPreparationStage)
 
 logger = init_logger(__name__)
 
@@ -46,6 +47,12 @@ class WanPipeline(LoRAPipeline, ComposedPipelineBase):
         self.add_stage(stage_name="latent_preparation_stage",
                        stage=LatentPreparationStage(scheduler=self.get_module("scheduler"),
                                                     transformer=self.get_module("transformer", None)))
+
+        # No-op unless denoise_strength + init_latents are both set. Must follow
+        # latent_preparation_stage: it re-noises the caller's latent using the
+        # seeded noise that stage produces.
+        self.add_stage(stage_name="partial_denoise_stage",
+                       stage=PartialDenoiseStage(scheduler=self.get_module("scheduler")))
 
         self.add_stage(stage_name="denoising_stage",
                        stage=DenoisingStage(transformer=self.get_module("transformer"),

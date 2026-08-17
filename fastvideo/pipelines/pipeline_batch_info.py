@@ -92,6 +92,12 @@ class ForwardBatch:
     video_path: str | None = None
     video_latent: torch.Tensor | None = None
 
+    # Partial-denoise entry (model-agnostic "strength"): run only the tail of
+    # the schedule on top of init_latents instead of starting from pure noise.
+    # Both must be set for PartialDenoiseStage to do anything.
+    denoise_strength: float | None = None
+    init_latents: torch.Tensor | None = None
+
     # Refine inputs (LongCat)
     refine_from: str | None = None
     t_thresh: float = 0.5
