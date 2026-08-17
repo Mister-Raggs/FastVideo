@@ -298,6 +298,49 @@ class KVProbeManager:
         logger.info("KV probe wrote %d layers to %s", len(layers), self.path)
 
 
+def apply_kv_window_override(model: nn.Module | None) -> int | None:
+    """Force `local_attn_size` on every causal self-attention module.
+
+    Not instrumentation -- this CHANGES BEHAVIOUR, and exists so the KV window
+    can be swept without editing checkpoint configs (the value comes from the
+    checkpoint, not from the dataclass default). Needed to calibrate a quality
+    signal: shrink the window on the *unmodified* model and see which metric
+    responds, before any allocation policy is built on top.
+
+    Must run before the denoising stage reads `local_attn_size` to size its
+    buffers -- post_init() is called before create_pipeline_stages(), so
+    attaching here is early enough.
+
+    No-op unless FASTVIDEO_KV_WINDOW is set. Returns the applied value.
+    """
+    raw = os.getenv("FASTVIDEO_KV_WINDOW", "").strip()
+    if not raw or model is None:
+        return None
+    try:
+        window = int(raw)
+    except ValueError:
+        logger.warning("FASTVIDEO_KV_WINDOW=%r is not an int; ignoring", raw)
+        return None
+
+    touched = 0
+    for _, module in model.named_modules():
+        if _is_causal_self_attn(module) and hasattr(module, "local_attn_size"):
+            module.local_attn_size = window
+            touched += 1
+    # the denoising stages read it off the transformer itself, and off the arch
+    # config, so set both or the cache buffers keep the old size
+    if hasattr(model, "local_attn_size"):
+        model.local_attn_size = window
+    arch = getattr(getattr(model, "config", None), "arch_config", None)
+    if arch is not None and hasattr(arch, "local_attn_size"):
+        arch.local_attn_size = window
+
+    logger.warning(
+        "FASTVIDEO_KV_WINDOW=%d applied to %d attention modules "
+        "(+transformer/arch_config) -- THIS CHANGES OUTPUT, not just instrumentation", window, touched)
+    return window
+
+
 def attach_kv_probe(model: nn.Module | None) -> KVProbeManager | None:
     """Attach KV probe hooks to the causal self-attention blocks of *model*.
 
