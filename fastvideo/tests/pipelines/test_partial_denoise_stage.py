@@ -42,6 +42,30 @@ def _batch(num_steps: int = 50, shape=(1, 16, 3, 8, 8)):
     return scheduler, batch
 
 
+def test_reads_from_batch_extra_escape_hatch():
+    """Callers can drive the stage via generate_video(_extra_overrides=...)."""
+    scheduler, batch = _batch(num_steps=50)
+    init = torch.randn_like(batch.latents)
+    batch.extra["denoise_strength"] = 0.4
+    batch.extra["init_latents"] = init
+
+    out = PartialDenoiseStage(scheduler).forward(batch, None)
+
+    assert len(out.timesteps) == 20
+    assert not torch.equal(out.latents, init)
+
+
+def test_dataclass_fields_win_over_extra():
+    scheduler, batch = _batch(num_steps=50)
+    batch.init_latents = torch.randn_like(batch.latents)
+    batch.denoise_strength = 0.4
+    batch.extra["denoise_strength"] = 0.9
+
+    out = PartialDenoiseStage(scheduler).forward(batch, None)
+
+    assert len(out.timesteps) == 20
+
+
 def test_noop_without_strength_or_init_latents():
     """The default t2v path must be untouched -- same objects, not just equal."""
     scheduler, batch = _batch()

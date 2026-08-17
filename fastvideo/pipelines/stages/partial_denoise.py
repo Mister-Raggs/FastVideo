@@ -52,8 +52,16 @@ class PartialDenoiseStage(PipelineStage):
         batch: ForwardBatch,
         fastvideo_args: FastVideoArgs,
     ) -> ForwardBatch:
+        # `batch.extra` is the framework's designed escape hatch (populated via
+        # generate_video(_extra_overrides=...)), so callers can drive this stage
+        # today without a SamplingParam change. A real img2img surface would
+        # promote `denoise_strength` to SamplingParam; the fields win when set.
         strength = batch.denoise_strength
+        if strength is None:
+            strength = batch.extra.get("denoise_strength")
         init_latents = batch.init_latents
+        if init_latents is None:
+            init_latents = batch.extra.get("init_latents")
 
         if strength is None or init_latents is None:
             return batch
