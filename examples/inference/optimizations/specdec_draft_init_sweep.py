@@ -60,6 +60,11 @@ DRAFT_VSA_SPARSITY = 0.8
 
 STRENGTHS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.7]
 
+# The strength the eyeball phases render. 0.3 is the interesting middle: the
+# verifier runs 15 of 50 steps, enough compute that it should show if it is
+# doing anything, while still a 3x nominal saving.
+EYEBALL_STRENGTH = 0.3
+
 PROMPT = ("A curious raccoon peers through a vibrant field of yellow sunflowers, its eyes "
           "wide with interest. The playful yet serene atmosphere is complemented by soft "
           "natural light filtering through the petals. Mid-shot, warm and cheerful tones.")
@@ -186,6 +191,43 @@ def cmd_sweep(out: Path) -> None:
     (out / "sweep_arms.json").write_text(json.dumps(records, indent=2))
 
 
+def cmd_eyeball_draft(out: Path) -> None:
+    """Render FastWan's raw 3-step output. Separate process from the Wan arms:
+    the VSA backend is selected by an env var read at model-build time."""
+    videos = out / "videos"
+    videos.mkdir(exist_ok=True)
+    gen = _generator(DRAFT_MODEL, vsa_sparsity=DRAFT_VSA_SPARSITY)
+    param = _sampling_param(DRAFT_MODEL)
+    gen.generate_video(PROMPT, sampling_param=param, output_path=str(videos / "a_draft_fastwan_3step"),
+                       save_video=True)
+    print(f"[eyeball] draft -> {videos / 'a_draft_fastwan_3step'}")
+
+
+def cmd_eyeball_wan(out: Path) -> None:
+    """Render draft-init and its equal-compute control at EYEBALL_STRENGTH."""
+    videos = out / "videos"
+    videos.mkdir(exist_ok=True)
+    draft_latent = torch.load(out / "draft_latent.pt")["latent"]
+    n_full = max(1, round(REFERENCE_STEPS * EYEBALL_STRENGTH))
+    control_steps = max(1, round(n_full + DRAFT_COST_IN_VERIFIER_STEPS))
+
+    gen = _generator(VERIFIER_MODEL)
+
+    param = _sampling_param(VERIFIER_MODEL, steps=REFERENCE_STEPS)
+    gen.generate_video(PROMPT, sampling_param=param,
+                       output_path=str(videos / f"b_draftinit_s{EYEBALL_STRENGTH:.2f}"), save_video=True,
+                       denoise_strength=EYEBALL_STRENGTH, init_latents=draft_latent)
+    print(f"[eyeball] draft-init ({n_full} verifier steps) -> b_draftinit_s{EYEBALL_STRENGTH:.2f}")
+
+    param_b = _sampling_param(VERIFIER_MODEL, steps=control_steps)
+    gen.generate_video(PROMPT, sampling_param=param_b,
+                       output_path=str(videos / f"c_control_{control_steps}step"), save_video=True)
+    print(f"[eyeball] control ({control_steps} steps) -> c_control_{control_steps}step")
+    print("\nCompare a_draft vs b_draftinit: if they are indistinguishable, the "
+          "verifier steps bought nothing and D5b closes.\nThen b_draftinit vs "
+          "c_control: that is the actual thesis, at equal compute.")
+
+
 def _cosine_distance(a: torch.Tensor, b: torch.Tensor) -> float:
     a32, b32 = a.flatten().float(), b.flatten().float()
     return float(1.0 - torch.nn.functional.cosine_similarity(a32.unsqueeze(0), b32.unsqueeze(0), dim=1).item())
@@ -229,14 +271,22 @@ def cmd_score(out: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=["draft", "reference", "sweep", "score"])
+    parser.add_argument("phase",
+                        choices=["draft", "reference", "sweep", "score", "eyeball-draft", "eyeball-wan"])
     parser.add_argument("--out", default="specdec_out")
     args = parser.parse_args()
 
     out = Path(os.path.expanduser(args.out))
     out.mkdir(parents=True, exist_ok=True)
 
-    {"draft": cmd_draft, "reference": cmd_reference, "sweep": cmd_sweep, "score": cmd_score}[args.phase](out)
+    {
+        "draft": cmd_draft,
+        "reference": cmd_reference,
+        "sweep": cmd_sweep,
+        "score": cmd_score,
+        "eyeball-draft": cmd_eyeball_draft,
+        "eyeball-wan": cmd_eyeball_wan,
+    }[args.phase](out)
 
 
 if __name__ == "__main__":
