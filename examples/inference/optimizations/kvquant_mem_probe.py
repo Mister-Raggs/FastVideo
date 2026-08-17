@@ -18,8 +18,9 @@ Run this before writing any quantizer:
 Knobs:
 
     FV_KVQ_MODEL=...  FV_KVQ_FRAMES=81  FV_KVQ_OUTPUT_DIR=...
-    FV_KVQ_VAE_TILING=1|0   enable/disable VAE tiling (Wan configs ship it OFF)
-    FV_KVQ_NO_OFFLOAD=1     pin every module resident (the all-resident arm)
+    FV_KVQ_VAE_TILING=1|0        enable/disable VAE tiling (Wan ships it OFF)
+    FV_KVQ_VAE_FEATURE_CACHE=0   required for tiling to actually engage on Wan
+    FV_KVQ_NO_OFFLOAD=1          pin every module resident (all-resident arm)
 
 Offload is left at FastVideo's defaults (all True) unless FV_KVQ_NO_OFFLOAD is
 set. The first run of this probe mirrored basic_self_forcing_causal.py, which
@@ -57,6 +58,14 @@ def main() -> None:
         # frames in one shot -- that untiled transient is what owns peak memory.
         pipeline_config.vae_tiling = tiling != "0"
 
+    if os.getenv("FV_KVQ_VAE_FEATURE_CACHE") == "0":
+        # WanVAE.decode() branches on use_feature_cache and never consults
+        # use_tiling, so enable_tiling() is a silent no-op on the Wan family.
+        # Turning the feature cache off routes decode through
+        # ParallelTiledVAE.decode, which is the only path that honours tiling.
+        # This changes the decode algorithm -- SSIM-gate before believing it.
+        pipeline_config.vae_config.use_feature_cache = False
+
     kwargs: dict[str, object] = {}
     if os.getenv("FV_KVQ_NO_OFFLOAD", "0") != "0":
         kwargs.update(text_encoder_cpu_offload=False, dit_cpu_offload=False, dit_layerwise_offload=False)
@@ -76,7 +85,9 @@ def main() -> None:
     sampling_param.seed = 42
 
     print(f"[step0] model={model_name} num_frames={sampling_param.num_frames} seed={sampling_param.seed} "
-          f"vae_tiling={pipeline_config.vae_tiling} no_offload={bool(kwargs)}")
+          f"vae_tiling={pipeline_config.vae_tiling} "
+          f"feature_cache={getattr(pipeline_config.vae_config, 'use_feature_cache', None)} "
+          f"no_offload={bool(kwargs)}")
 
     start = time.perf_counter()
     generator.generate_video(PROMPT, output_path=output_dir, save_video=True, sampling_param=sampling_param)
