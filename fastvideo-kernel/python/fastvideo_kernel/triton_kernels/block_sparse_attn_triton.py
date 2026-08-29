@@ -16,10 +16,11 @@ import triton.language as tl
 import math  # small utility needed by the sparse wrapper
 # ──────────────────────────── SPARSE ADDITION END ─────────────────────────────
 
-# BLOCK_M / BLOCK_N are fixed at 64 because they are structural, not tunable:
+# BLOCK_M / BLOCK_N are structural, not freely tunable:
 # the kernel indexes the top-k list per BLOCK_M q-tile and addresses keys as
 # kv_idx * BLOCK_N, so both must match the granularity q2k_index and
-# variable_block_sizes were built at.
+# variable_block_sizes were built at. The early-prune hook keeps the autotuner
+# on the caller's 64- or 128-token metadata granularity.
 #
 # num_stages / num_warps ARE free, and the previous {3, 4, 7} was inherited from
 # the upstream tutorial rather than tuned here. It skips 5 and 6; on Blackwell
@@ -28,15 +29,27 @@ import math  # small utility needed by the sparse wrapper
 # per architecture, so other GPUs re-tune rather than inheriting this choice.
 configs = [
     triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
-    for BM in [64]\
-    for BN in [64]\
+    for BM in [64, 128]\
+    for BN in [BM]\
     for s in [2, 3, 4, 5, 6, 7]\
     for w in [4, 8]\
 ]
 
 
+def _prune_block_size_configs(configs, named_args, **_kwargs):
+    block_size = named_args.get("VSA_BLOCK_SIZE", _kwargs.get("VSA_BLOCK_SIZE"))
+    return [
+        config for config in configs
+        if config.kwargs["BLOCK_M"] == block_size and config.kwargs["BLOCK_N"] == block_size
+    ]
+
+
 # ──────────────────────────── SPARSE ADDITION BEGIN ───────────────────────────
-@triton.autotune(configs, key=["N_CTX_Q", "HEAD_DIM"])
+@triton.autotune(
+    configs,
+    key=["N_CTX_Q", "HEAD_DIM", "VSA_BLOCK_SIZE"],
+    prune_configs_by={"early_config_prune": _prune_block_size_configs},
+)
 @triton.jit
 def _attn_fwd_sparse(
         Q,
@@ -69,14 +82,14 @@ def _attn_fwd_sparse(
         H,
         N_CTX_Q,  #
         N_CTX_KV,  #
+        VSA_BLOCK_SIZE: tl.constexpr,  #
         HEAD_DIM: tl.constexpr,  #
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         STAGE: tl.constexpr):
-    """
-    64×64 **block-sparse** forward kernel. Back-prop kernels remain dense
-    (32×64 and 64×32) – memory footprint unchanged.
-    """
+    """64×64 or 128×128 block-sparse forward kernel."""
+    tl.static_assert(BLOCK_M == VSA_BLOCK_SIZE)
+    tl.static_assert(BLOCK_N == VSA_BLOCK_SIZE)
 
     # ----- program-id mapping -----
     q_blk = tl.program_id(0)  # Q-tile index
@@ -700,22 +713,33 @@ def _attn_bwd_dq_kernel(
 
 
 # ──────────────────────────── SPARSE ADDITION BEGIN ───────────────────────────
-def triton_block_sparse_attn_forward(q, k, v, q2k_index, q2k_num, variable_block_sizes):
+def triton_block_sparse_attn_forward(
+    q,
+    k,
+    v,
+    q2k_index,
+    q2k_num,
+    variable_block_sizes,
+    block_size=64,
+):
     B, H, Tq, D = q.shape
     Tkv = k.shape[2]
     sm_scale = 1.0 / math.sqrt(D)
     max_kv_blks = q2k_index.shape[-1]
-    assert Tq % 64 == 0, f"q length must be a multiple of 64, but got {Tq}"
-    assert Tkv % 64 == 0, f"kv length must be a multiple of 64, but got {Tkv}"
-    assert q2k_num.shape[
-        -1] == Tq // 64, f"shape mismatch, Tq // 64 = {Tq // 64}, q2k_num.shape[-2] = {q2k_num.shape[-2]}"
-    assert variable_block_sizes.numel() == Tkv // 64, (
-        f"shape mismatch, variable_block_sizes must have length {Tkv // 64}, "
+    assert block_size in (64, 128), f"block_size must be 64 or 128, but got {block_size}"
+    assert Tq % block_size == 0, f"q length must be a multiple of {block_size}, but got {Tq}"
+    assert Tkv % block_size == 0, f"kv length must be a multiple of {block_size}, but got {Tkv}"
+    expected_q_blocks = Tq // block_size
+    assert q2k_num.shape[-1] == expected_q_blocks, (
+        f"shape mismatch, expected {expected_q_blocks} q blocks for "
+        f"Tq={Tq} and block_size={block_size}, got {q2k_num.shape[-1]}")
+    assert variable_block_sizes.numel() == Tkv // block_size, (
+        f"shape mismatch, variable_block_sizes must have length {Tkv // block_size}, "
         f"got {variable_block_sizes.numel()}")
     o = torch.empty_like(q)
     M = torch.empty((B, H, Tq), dtype=torch.float32, device=q.device)
 
-    grid = lambda _: (triton.cdiv(Tq, 64), B * H, 1)
+    grid = lambda _: (triton.cdiv(Tq, block_size), B * H, 1)
     _attn_fwd_sparse[grid](q,
                            k,
                            v,
@@ -746,6 +770,7 @@ def triton_block_sparse_attn_forward(q, k, v, q2k_index, q2k_num, variable_block
                            H,
                            Tq,
                            Tkv,
+                           VSA_BLOCK_SIZE=block_size,
                            HEAD_DIM=D,
                            STAGE=3)
 
