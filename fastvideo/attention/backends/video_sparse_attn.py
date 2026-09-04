@@ -26,6 +26,13 @@ logger = init_logger(__name__)
 # forward(): (4,4,4)=64 -> existing TK/Triton path (default, unchanged);
 # (4,8,8)=256 -> FA4 CuTe block-sparse attention fastpath (Blackwell).
 VSA_TILE_SIZE = (4, 4, 4)
+VSA_TILE_SHAPES: dict[int, tuple[int, int, int]] = {
+    64: VSA_TILE_SIZE,
+    # Keep Wan's established 4x4 spatial footprint and coarsen two adjacent
+    # temporal spans. For the standard 81-frame workload this preserves the
+    # padded token count while creating native 128-token blocks.
+    128: (8, 4, 4),
+}
 
 
 @functools.lru_cache(maxsize=10)
@@ -151,6 +158,8 @@ class VideoSparseAttentionMetadata(AttentionMetadata):
     # in postprocess_output().  Avoids materializing the intermediate
     # ``[B, len(non_pad_index), H, D]`` tensor on every layer.
     untile_combined_index: torch.LongTensor
+    tile_size: tuple[int, int, int] = VSA_TILE_SIZE
+    native_128: bool | None = None
     # Per-step shared padded buffer used by tile().  Inference can reuse this
     # across VSA layers, but training disables it so activation checkpointing
     # can release the large tiled QKVG scratch tensor after each attention call.
@@ -205,20 +214,27 @@ class VideoSparseAttentionMetadataBuilder(AttentionMetadataBuilder):
         VSA_sparsity: float,
         device: torch.device,
         cache_tile_buf: bool = True,
+        tile_size: int = 64,
+        native_128: bool | None = None,
         **kwargs: dict[str, Any],
     ) -> VideoSparseAttentionMetadata:
+        tile_shape = VSA_TILE_SHAPES.get(int(tile_size))
+        if tile_shape is None:
+            raise ValueError(f"VSA tile_size must be one of {sorted(VSA_TILE_SHAPES)}, got {tile_size!r}")
+        if native_128 and int(tile_size) != 128:
+            raise ValueError("VSA native_128 requires tile_size=128")
         patch_size = patch_size
         dit_seq_shape = (raw_latent_shape[0] // patch_size[0], raw_latent_shape[1] // patch_size[1],
                          raw_latent_shape[2] // patch_size[2])
 
-        num_tiles = (math.ceil(dit_seq_shape[0] / VSA_TILE_SIZE[0]), math.ceil(dit_seq_shape[1] / VSA_TILE_SIZE[1]),
-                     math.ceil(dit_seq_shape[2] / VSA_TILE_SIZE[2]))
+        num_tiles = (math.ceil(dit_seq_shape[0] / tile_shape[0]), math.ceil(dit_seq_shape[1] / tile_shape[1]),
+                     math.ceil(dit_seq_shape[2] / tile_shape[2]))
         total_seq_length = math.prod(dit_seq_shape)
 
-        tile_partition_indices = get_tile_partition_indices(dit_seq_shape, VSA_TILE_SIZE, device)
-        reverse_tile_partition_indices = get_reverse_tile_partition_indices(dit_seq_shape, VSA_TILE_SIZE, device)
-        variable_block_sizes = construct_variable_block_sizes(dit_seq_shape, num_tiles, device)
-        non_pad_index = get_non_pad_index(variable_block_sizes, math.prod(VSA_TILE_SIZE))
+        tile_partition_indices = get_tile_partition_indices(dit_seq_shape, tile_shape, device)
+        reverse_tile_partition_indices = get_reverse_tile_partition_indices(dit_seq_shape, tile_shape, device)
+        variable_block_sizes = construct_variable_block_sizes(dit_seq_shape, num_tiles, device, tile_shape)
+        non_pad_index = get_non_pad_index(variable_block_sizes, math.prod(tile_shape))
         untile_combined_index = non_pad_index[reverse_tile_partition_indices]
 
         return VideoSparseAttentionMetadata(
@@ -232,6 +248,8 @@ class VideoSparseAttentionMetadataBuilder(AttentionMetadataBuilder):
             variable_block_sizes=variable_block_sizes,
             non_pad_index=non_pad_index,
             untile_combined_index=untile_combined_index,
+            tile_size=tile_shape,
+            native_128=native_128,
             cache_tile_buf=cache_tile_buf)
 
 
@@ -263,9 +281,9 @@ class VideoSparseAttentionImpl(AttentionImpl):
         contract holds; future callers must preserve it.
         """
         num_tiles = attn_metadata.num_tiles
-        t_padded_size = num_tiles[0] * VSA_TILE_SIZE[0]
-        h_padded_size = num_tiles[1] * VSA_TILE_SIZE[1]
-        w_padded_size = num_tiles[2] * VSA_TILE_SIZE[2]
+        t_padded_size = num_tiles[0] * attn_metadata.tile_size[0]
+        h_padded_size = num_tiles[1] * attn_metadata.tile_size[1]
+        w_padded_size = num_tiles[2] * attn_metadata.tile_size[2]
         target_shape = (x.shape[0], t_padded_size * h_padded_size * w_padded_size, x.shape[-2], x.shape[-1])
 
         if not attn_metadata.cache_tile_buf:
@@ -310,7 +328,8 @@ class VideoSparseAttentionImpl(AttentionImpl):
         gate_compress: torch.Tensor,
         attn_metadata: VideoSparseAttentionMetadata,
     ) -> torch.Tensor:
-        block_elements = math.prod(VSA_TILE_SIZE)
+        tile_size = attn_metadata.tile_size
+        block_elements = math.prod(tile_size)
         cur_topk = _compute_cur_topk(attn_metadata)
 
         # 256-element tiles auto-route to the FA4 CuTe BSHD fastpath, which
@@ -322,7 +341,7 @@ class VideoSparseAttentionImpl(AttentionImpl):
                                           attn_metadata.variable_block_sizes,
                                           attn_metadata.variable_block_sizes,
                                           cur_topk,
-                                          block_size=VSA_TILE_SIZE,
+                                          block_size=tile_size,
                                           compress_attn_weight=gate_compress)
 
         if video_sparse_attn is None:
@@ -338,5 +357,6 @@ class VideoSparseAttentionImpl(AttentionImpl):
                                  attn_metadata.variable_block_sizes,
                                  attn_metadata.variable_block_sizes,
                                  cur_topk,
-                                 block_size=VSA_TILE_SIZE,
-                                 compress_attn_weight=gate_compress).transpose(1, 2)
+                                 block_size=tile_size,
+                                 compress_attn_weight=gate_compress,
+                                 native_128=attn_metadata.native_128).transpose(1, 2)

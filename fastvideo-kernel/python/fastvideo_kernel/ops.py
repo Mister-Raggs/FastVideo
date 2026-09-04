@@ -71,6 +71,7 @@ def video_sparse_attn(
     topk: int,
     block_size: int | tuple = 64,
     compress_attn_weight: torch.Tensor = None,
+    native_128: bool | None = None,
 ) -> torch.Tensor:
     """VSA entrypoint for [B, H, S, D] tensors.
 
@@ -124,7 +125,10 @@ def video_sparse_attn(
 
     if block_elements in (128, 256):
         attention = block_sparse_attn_128 if block_elements == 128 else block_sparse_attn_256
-        out_s = attention(q, k, v, mask, variable_block_sizes)[0]
+        if block_elements == 128:
+            out_s = attention(q, k, v, mask, variable_block_sizes, native_triton=native_128)[0]
+        else:
+            out_s = attention(q, k, v, mask, variable_block_sizes)[0]
     else:
         out_s = block_sparse_attn(q, k, v, mask, variable_block_sizes)[0]
 

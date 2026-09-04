@@ -489,6 +489,8 @@ class LTX2DenoisingStage(PipelineStage):
                     patch_size=fastvideo_args.pipeline_config.dit_config.patch_size,
                     VSA_sparsity=fastvideo_args.VSA_sparsity,
                     device=latents.device,
+                    tile_size=int(batch.extra.get("vsa_tile_size", 64)),
+                    native_128=batch.extra.get("vsa_native_128"),
                 )
 
             with torch.autocast(

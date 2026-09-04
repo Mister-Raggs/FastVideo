@@ -51,3 +51,41 @@ def test_native_128_flag_preserves_route_a_when_gradients_are_needed(monkeypatch
     result = vsa128.block_sparse_attn_128(*_inputs(requires_grad=True))
 
     assert result is route_a_result
+
+
+def test_explicit_route_choice_overrides_worker_environment(monkeypatch) -> None:
+    route_a_result = (object(), object())
+    monkeypatch.setenv("FASTVIDEO_VSA_TRITON", "1")
+    monkeypatch.setenv("FASTVIDEO_VSA_TRITON_NATIVE_128", "1")
+    monkeypatch.setattr(
+        vsa128,
+        "block_sparse_attn_triton_128_from_mask_inference",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("native route should be explicitly disabled")),
+    )
+    monkeypatch.setattr(vsa128, "_triton_via_route_a_128", lambda *_args: route_a_result)
+
+    with torch.inference_mode():
+        result = vsa128.block_sparse_attn_128(*_inputs(), native_triton=False)
+
+    assert result is route_a_result
+
+
+def test_explicit_native_choice_overrides_disabled_worker_environment(monkeypatch) -> None:
+    native_result = (object(), object())
+    monkeypatch.setenv("FASTVIDEO_VSA_TRITON", "1")
+    monkeypatch.setenv("FASTVIDEO_VSA_TRITON_NATIVE_128", "0")
+    monkeypatch.setattr(
+        vsa128,
+        "block_sparse_attn_triton_128_from_mask_inference",
+        lambda *_args: native_result,
+    )
+    monkeypatch.setattr(
+        vsa128,
+        "_triton_via_route_a_128",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("route A should be explicitly disabled")),
+    )
+
+    with torch.inference_mode():
+        result = vsa128.block_sparse_attn_128(*_inputs(), native_triton=True)
+
+    assert result is native_result

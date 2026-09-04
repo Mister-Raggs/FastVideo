@@ -53,6 +53,8 @@ REQUEST_BATCH_EXTRA_PASSTHROUGH_FIELDS = (
     "vsa_mode",
     "vsa_dense_first_n_steps",
     "vsa_dense_layers",
+    "vsa_tile_size",
+    "vsa_native_128",
 )
 # torch.compile kwargs that map to first-class CompileConfig fields.
 _COMPILE_TYPED_KEYS = ("backend", "fullgraph", "mode", "dynamic")

@@ -20,6 +20,8 @@ into the native Triton kernel; gradient-enabled calls retain route A.
 
 from __future__ import annotations
 
+import functools
+import logging
 import os
 from typing import Tuple
 
@@ -38,6 +40,12 @@ from .block_sparse_attn import (
 
 _KV_BLOCK_PHYS = 128  # FA4 CuTe BSA forward uses 128-token KV blocks.
 _KV_BLOCK_TRITON = 64  # Existing Triton path uses 64-token KV blocks.
+logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=2)
+def _log_triton_128_route(native: bool) -> None:
+    logger.info("VSA-128 Triton sparse route: %s", "native-128" if native else "expanded route-A/64")
 
 
 def _resolve_backend() -> str:
@@ -55,8 +63,15 @@ def _resolve_backend() -> str:
     return "triton"
 
 
-def _use_native_triton_128(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> bool:
-    if os.environ.get("FASTVIDEO_VSA_TRITON_NATIVE_128", "0") != "1":
+def _use_native_triton_128(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    requested: bool | None = None,
+) -> bool:
+    if requested is None:
+        requested = os.environ.get("FASTVIDEO_VSA_TRITON_NATIVE_128", "0") == "1"
+    if not requested:
         return False
     return not (torch.is_grad_enabled() and any(tensor.requires_grad for tensor in (q, k, v)))
 
@@ -164,13 +179,16 @@ def block_sparse_attn_128(
     v: torch.Tensor,
     logical_block_map_128: torch.Tensor,
     logical_variable_block_sizes_128: torch.Tensor,
+    native_triton: bool | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """VSA-128 sparse-branch entrypoint for [B, H, S, D] inputs."""
     if logical_block_map_128.dim() == 3:
         logical_block_map_128 = logical_block_map_128.unsqueeze(0)
 
     if _resolve_backend() == "triton":
-        if _use_native_triton_128(q, k, v):
+        use_native = _use_native_triton_128(q, k, v, native_triton)
+        _log_triton_128_route(use_native)
+        if use_native:
             return block_sparse_attn_triton_128_from_mask_inference(
                 q,
                 k,
@@ -190,6 +208,7 @@ def block_sparse_attn_128_bshd(
     v: torch.Tensor,
     logical_block_map_128: torch.Tensor,
     logical_variable_block_sizes_128: torch.Tensor,
+    native_triton: bool | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """VSA-128 sparse-branch entrypoint for [B, S, H, D] inputs."""
     if logical_block_map_128.dim() == 3:
@@ -199,7 +218,9 @@ def block_sparse_attn_128_bshd(
         q_bhsd = q.transpose(1, 2).contiguous()
         k_bhsd = k.transpose(1, 2).contiguous()
         v_bhsd = v.transpose(1, 2).contiguous()
-        if _use_native_triton_128(q, k, v):
+        use_native = _use_native_triton_128(q, k, v, native_triton)
+        _log_triton_128_route(use_native)
+        if use_native:
             out_bhsd, aux = block_sparse_attn_triton_128_from_mask_inference(
                 q_bhsd,
                 k_bhsd,

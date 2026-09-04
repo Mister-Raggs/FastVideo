@@ -389,6 +389,8 @@ class MatrixGame2CausalDenoisingStage(DenoisingStage):
                         patch_size=ctx.fastvideo_args.pipeline_config.dit_config.patch_size,
                         VSA_sparsity=ctx.fastvideo_args.VSA_sparsity,
                         device=get_local_torch_device(),
+                        tile_size=int(ctx.batch.extra.get("vsa_tile_size", 64)),
+                        native_128=ctx.batch.extra.get("vsa_native_128"),
                     )
                     assert attn_metadata is not None, "attn_metadata cannot be None"
                 else:
