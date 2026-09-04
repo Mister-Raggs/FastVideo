@@ -75,9 +75,13 @@ def build_parser(description: str | None = None) -> argparse.ArgumentParser:
                         help="run-level VSA sparsity in [0, 1); 0.9 is the checkpoint's trained policy")
     parser.add_argument("--vsa-tile-size",
                         type=int,
-                        choices=(64, 256),
+                        choices=(64, 128, 256),
                         default=64,
                         help="VSA-H3 tile size; 64 is the checkpoint's trained and measured geometry")
+    parser.add_argument("--vsa-native-128",
+                        action=argparse.BooleanOptionalAction,
+                        default=False,
+                        help="use the experimental native Triton kernel for tile-128 inference")
     parser.add_argument("--vsa-kernel",
                         choices=("triton", "sm100a"),
                         default="sm100a",
@@ -134,6 +138,10 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--num-gpus must be at least 1")
     if not 0.0 <= args.vsa_sparsity < 1.0:
         parser.error("--vsa-sparsity must be in [0, 1)")
+    if args.vsa_native_128 and args.vsa_tile_size != 128:
+        parser.error("--vsa-native-128 requires --vsa-tile-size 128")
+    if args.vsa_native_128 and args.vsa_kernel != "triton":
+        parser.error("--vsa-native-128 requires --vsa-kernel triton")
     if args.compile_mode is not None and args.inference_torch_compile:
         parser.error("--compile-mode cannot be combined with regional compile; pass --no-inference-torch-compile")
     return args
@@ -167,6 +175,7 @@ def profile_environment(args: argparse.Namespace) -> dict[str, str | None]:
         "FASTVIDEO_ATTENTION_BACKEND": "VIDEO_SPARSE_ATTN_H3" if use_vsa else "FLASH_ATTN",
         "FASTVIDEO_VSA_SM100A": "1" if use_vsa and args.vsa_kernel == "sm100a" else "0",
         "FASTVIDEO_VSA_CUTEDSL": "0",
+        "FASTVIDEO_VSA_TRITON_NATIVE_128": "1" if use_vsa and args.vsa_native_128 else "0",
         # A non-empty output path enables the diagnostic probe.
         "FASTVIDEO_H3_VSA_PROBE": None,
         "FASTVIDEO_DISABLE_ATTENTION_COMPILE": "0",

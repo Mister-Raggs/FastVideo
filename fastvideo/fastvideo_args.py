@@ -208,7 +208,7 @@ class FastVideoArgs:
 
     # VSA parameters
     VSA_sparsity: float = 0.0  # inference/validation sparsity
-    VSA_tile_size: int = 256  # VSA-H3 tile size (256 or 64); 64 = native Triton path
+    VSA_tile_size: int = 256  # VSA-H3 tile size (256, 128, or 64)
 
     # V-MoBA parameters
     moba_config_path: str | None = None
@@ -743,7 +743,7 @@ class FastVideoArgs:
             "--VSA-tile-size",
             type=int,
             default=FastVideoArgs.VSA_tile_size,
-            help="VSA-H3 tile size in tokens (256 or 64); 64 runs the native Triton block-sparse path",
+            help="VSA-H3 tile size in tokens (256, 128, or 64)",
         )
 
         # Master port for distributed training/inference

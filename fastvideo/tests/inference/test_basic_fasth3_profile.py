@@ -68,6 +68,7 @@ def test_default_all_profile_matches_fastest_contract(tmp_path):
 
     assert environment["FASTVIDEO_VSA_SM100A"] == "1"
     assert environment["FASTVIDEO_VSA_CUTEDSL"] == "0"
+    assert environment["FASTVIDEO_VSA_TRITON_NATIVE_128"] == "0"
     assert environment["FASTVIDEO_DISABLE_ATTENTION_COMPILE"] == "0"
     assert environment["FASTVIDEO_FA4"] == "1"
     assert environment["FASTVIDEO_NVFP4_FA4"] == "0"
@@ -116,6 +117,30 @@ def test_default_sigma_grid_runs_exactly_four_dit_forwards():
     assert scheduler.timesteps is not None and len(scheduler.timesteps) == 4
 
 
+def test_native_128_profile_sets_matching_tile_and_kernel_environment():
+    args = _args(
+        "--vsa-tile-size",
+        "128",
+        "--vsa-native-128",
+        "--vsa-kernel",
+        "triton",
+        "--no-inference-torch-compile",
+    )
+
+    assert args.vsa_tile_size == 128
+    assert fasth3.profile_environment(args)["FASTVIDEO_VSA_TRITON_NATIVE_128"] == "1"
+
+
+def test_native_128_profile_rejects_other_tile_sizes():
+    with pytest.raises(SystemExit):
+        _args("--vsa-native-128")
+
+
+def test_native_128_profile_rejects_sm100a_kernel_selection():
+    with pytest.raises(SystemExit):
+        _args("--vsa-tile-size", "128", "--vsa-native-128")
+
+
 def test_strict_profile_changes_only_non_parity_fusions():
     all_args = _args("--profile", "all")
     strict_args = _args("--profile", "strict")
@@ -151,6 +176,7 @@ def test_opt_outs_override_inherited_environment(monkeypatch):
     assert "FASTVIDEO_H3_VSA_PROBE" not in fasth3.os.environ
     assert fasth3.os.environ["FASTVIDEO_VSA_SM100A"] == "0"
     assert fasth3.os.environ["FASTVIDEO_VSA_CUTEDSL"] == "0"
+    assert fasth3.os.environ["FASTVIDEO_VSA_TRITON_NATIVE_128"] == "0"
     assert fasth3.os.environ["FASTVIDEO_DISABLE_ATTENTION_COMPILE"] == "0"
     assert fasth3.os.environ["FASTVIDEO_FA4"] == "0"
     assert fasth3.os.environ["FASTVIDEO_NVFP4_FA4"] == "0"

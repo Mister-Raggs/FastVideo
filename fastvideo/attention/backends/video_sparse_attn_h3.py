@@ -53,10 +53,14 @@ import torch
 
 try:
     from fastvideo_kernel.block_sparse_attn import block_sparse_attn as block_sparse_attn_64_bhsd
-    from fastvideo_kernel.block_sparse_attn_256 import block_sparse_attn_256_bshd
+    from fastvideo_kernel.block_sparse_attn_256 import (
+        block_sparse_attn_128_bshd,
+        block_sparse_attn_256_bshd,
+    )
     from fastvideo_kernel.triton_kernels.index import map_to_index
 except ImportError:
     block_sparse_attn_64_bhsd = None
+    block_sparse_attn_128_bshd = None
     block_sparse_attn_256_bshd = None
     map_to_index = None
 
@@ -90,6 +94,7 @@ _TILE_ELEMS = math.prod(VSA_H3_TILE_SIZE)
 # 256->64 mask expansion is involved and FASTVIDEO_VSA_CUTEDSL does not apply.
 VSA_H3_TILE_SHAPES: dict[int, tuple[int, int, int]] = {
     _TILE_ELEMS: VSA_H3_TILE_SIZE,
+    128: (2, 8, 8),
     64: (4, 4, 4),
 }
 
@@ -308,8 +313,7 @@ class MiniMaxH3VSAMetadata(AttentionMetadata):
     # this tensor with each implementation's tensor-valued layer index so the
     # shared block code does not specialize once per Python ``layer_idx``.
     dense_layers_tensor: torch.Tensor
-    # tokens per tile (256 or 64); selects the tile geometry AND the kernel
-    # route in forward() (256 -> VSA-256 CuTe/Triton, 64 -> native Triton)
+    # Tokens per tile; selects both geometry and kernel route in forward().
     tile_elems: int = _TILE_ELEMS
     # layers forced dense regardless of sparsity (probe-guided opt-outs)
     dense_layers: tuple[int, ...] = ()
@@ -565,10 +569,13 @@ class MiniMaxH3VSAImpl(AttentionImpl):
         tile_elems = attn_metadata.tile_elems
         if regional_compiling and tile_elems != 64:
             raise RuntimeError("VSA-H3 regional fullgraph compile requires 64-token tiles; disable "
-                               "inference_torch_compile for tile-256/CuTe runs.")
+                               "inference_torch_compile for tile-128/256 runs.")
         if tile_elems == 64:
             if block_sparse_attn_64_bhsd is None:
                 raise NotImplementedError("fastvideo_kernel.block_sparse_attn is not installed")
+        elif tile_elems == 128:
+            if block_sparse_attn_128_bshd is None:
+                raise NotImplementedError("fastvideo_kernel.block_sparse_attn_128 is not installed")
         elif block_sparse_attn_256_bshd is None:
             raise NotImplementedError("fastvideo_kernel.block_sparse_attn_256 is not installed")
 
@@ -738,6 +745,14 @@ class MiniMaxH3VSAImpl(AttentionImpl):
             if has_sm100a_pair and use_sm100a:
                 out_bhsd = out_bhsd[:, :, :logical_seq_len]
             out = out_bhsd.transpose(1, 2).contiguous()
+        elif tile_elems == 128:
+            out, _ = block_sparse_attn_128_bshd(
+                logical_query,
+                logical_key,
+                logical_value,
+                mask,
+                attn_metadata.variable_block_sizes,
+            )
         else:
             out, _ = block_sparse_attn_256_bshd(
                 logical_query,
