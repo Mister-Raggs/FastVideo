@@ -246,6 +246,54 @@ def _backward_triton(ctx, grad_o, grad_M):
 
 block_sparse_attn_triton.register_autograd(_backward_triton, setup_context=_setup_context_triton)
 
+
+@torch.library.custom_op(
+    "fastvideo_kernel::block_sparse_attn_triton_128_from_mask_inference",
+    mutates_args=(),
+    device_types="cuda",
+)
+def block_sparse_attn_triton_128_from_mask_inference(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_map: torch.Tensor,
+    variable_block_sizes: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compact native 128-token metadata and launch the inference-only kernel."""
+    from fastvideo_kernel.triton_kernels.block_sparse_attn_triton import (
+        triton_block_sparse_attn_forward, )
+    from fastvideo_kernel.triton_kernels.index import map_to_index
+
+    q2k_idx, q2k_num = map_to_index(block_map.to(torch.bool).contiguous())
+    return triton_block_sparse_attn_forward(
+        q.contiguous(),
+        k.contiguous(),
+        v.contiguous(),
+        q2k_idx,
+        q2k_num,
+        variable_block_sizes.to(torch.int32).contiguous(),
+        block_size=128,
+    )
+
+
+@torch.library.register_fake(
+    "fastvideo_kernel::block_sparse_attn_triton_128_from_mask_inference")
+def _block_sparse_attn_triton_128_from_mask_inference_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_map: torch.Tensor,
+    variable_block_sizes: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return (
+        torch.empty_like(q),
+        torch.empty(
+            (q.shape[0], q.shape[1], q.shape[2]),
+            device=q.device,
+            dtype=torch.float32,
+        ),
+    )
+
 # ---------------------------------------------------------------------------
 # SM90 backend custom ops (index-native)
 # ---------------------------------------------------------------------------
