@@ -1,5 +1,6 @@
 import math
 
+import pytest
 import torch
 
 from fastvideo.attention.backends import video_sparse_attn as vsa_module
@@ -11,7 +12,13 @@ from fastvideo.attention.backends.video_sparse_attn import (
 )
 
 
-def _build_metadata(cache_tile_buf: bool, raw_latent_shape=(4, 4, 4), VSA_sparsity=0.5):
+def _build_metadata(
+    cache_tile_buf: bool,
+    raw_latent_shape=(4, 4, 4),
+    VSA_sparsity=0.5,
+    tile_size=64,
+    native_128=None,
+):
     return VideoSparseAttentionMetadataBuilder().build(
         current_timestep=0,
         raw_latent_shape=raw_latent_shape,
@@ -19,6 +26,8 @@ def _build_metadata(cache_tile_buf: bool, raw_latent_shape=(4, 4, 4), VSA_sparsi
         VSA_sparsity=VSA_sparsity,
         device=torch.device("cpu"),
         cache_tile_buf=cache_tile_buf,
+        tile_size=tile_size,
+        native_128=native_128,
     )
 
 
@@ -83,9 +92,11 @@ def test_vsa_forward_cur_topk_uses_padded_kv_block_count(monkeypatch):
         topk,
         block_size,
         compress_attn_weight,
+        native_128,
     ):
         captured["topk"] = topk
         captured["block_size"] = block_size
+        captured["native_128"] = native_128
         assert torch.equal(variable_block_sizes, metadata.variable_block_sizes)
         assert torch.equal(q_variable_block_sizes, metadata.variable_block_sizes)
         return query
@@ -98,7 +109,56 @@ def test_vsa_forward_cur_topk_uses_padded_kv_block_count(monkeypatch):
     assert unpadded_topk < expected_topk
     assert captured["topk"] == expected_topk
     assert captured["block_size"] == VSA_TILE_SIZE
+    assert captured["native_128"] is None
     assert output.shape == query.shape
+
+
+def test_vsa_128_geometry_preserves_standard_wan_padded_token_count():
+    tile64 = _build_metadata(cache_tile_buf=True, raw_latent_shape=(21, 28, 52))
+    tile128 = _build_metadata(
+        cache_tile_buf=True,
+        raw_latent_shape=(21, 28, 52),
+        tile_size=128,
+        native_128=True,
+    )
+
+    padded64 = tile64.variable_block_sizes.numel() * math.prod(tile64.tile_size)
+    padded128 = tile128.variable_block_sizes.numel() * math.prod(tile128.tile_size)
+
+    assert tile64.tile_size == (4, 4, 4)
+    assert tile128.tile_size == (8, 4, 4)
+    assert tile128.native_128 is True
+    assert padded128 == padded64
+    assert tile128.total_seq_length == tile64.total_seq_length
+
+
+def test_vsa_128_forward_passes_explicit_native_route(monkeypatch):
+    impl = object.__new__(VideoSparseAttentionImpl)
+    metadata = _build_metadata(cache_tile_buf=True, raw_latent_shape=(8, 4, 4), tile_size=128, native_128=True)
+    captured = {}
+
+    def fake_video_sparse_attn(*args, **kwargs):
+        captured.update(kwargs)
+        return args[0]
+
+    monkeypatch.setattr(vsa_module, "video_sparse_attn", fake_video_sparse_attn)
+    query = torch.ones(1, 128, 1, 1)
+
+    output = impl.forward(query, query, query, query, metadata)
+
+    assert captured["block_size"] == (8, 4, 4)
+    assert captured["native_128"] is True
+    assert output.shape == query.shape
+
+
+def test_vsa_metadata_rejects_unknown_tile_size():
+    with torch.no_grad(), pytest.raises(ValueError, match="tile_size must be one of"):
+        _build_metadata(cache_tile_buf=True, tile_size=256)
+
+
+def test_vsa_native_128_rejects_default_tile_geometry():
+    with pytest.raises(ValueError, match="native_128 requires tile_size=128"):
+        _build_metadata(cache_tile_buf=True, native_128=True)
 
 
 def test_vsa_cur_topk_clamps_to_valid_block_range():

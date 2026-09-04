@@ -236,6 +236,8 @@ class CausalDMDDenosingStage(DenoisingStage):
                                 patch_size=fastvideo_args.pipeline_config.dit_config.patch_size,  # type: ignore
                                 VSA_sparsity=fastvideo_args.VSA_sparsity,  # type: ignore
                                 device=get_local_torch_device(),  # type: ignore
+                                tile_size=int(batch.extra.get("vsa_tile_size", 64)),
+                                native_128=batch.extra.get("vsa_native_128"),
                             )  # type: ignore
                             assert attn_metadata is not None, "attn_metadata cannot be None"
                         else:
