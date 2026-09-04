@@ -9,6 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import fastvideo.attention.backends.video_sparse_attn_h3 as vsa_h3
 from fastvideo.attention.backends.video_sparse_attn_h3 import (_TILE_ELEMS, MiniMaxH3VSAImpl,
                                                                MiniMaxH3VSAMetadataBuilder, _build_block_mask,
                                                                _pool_tiles, _validate_h3_tile_geometry,
@@ -210,6 +211,42 @@ def test_geometry_tile64_production_shape():
     assert torch.equal(buf[:, meta64.untile_combined_index], x)
 
 
+def test_geometry_tile128_production_shape():
+    """The experimental (2,8,8) geometry covers every production token."""
+    meta = _build(_PROD, tile_size=128)
+    assert meta.tile_elems == 128
+    assert meta.num_prefix_tiles == 3 + 4
+    assert meta.num_video_tiles == 19 * 3 * 6
+    assert int(meta.variable_block_sizes.sum()) == meta.total_seq_length
+    assert int(meta.variable_block_sizes.max()) <= 128
+
+    x = torch.randn(1, meta.total_seq_length, 2, 4)
+    buf = _impl().tile(x, meta)
+    assert torch.equal(buf[:, meta.untile_combined_index], x)
+
+
+def test_tile128_forward_uses_128_wrapper(monkeypatch):
+    meta = _build(_TINY, sparsity=0.5, tile_size=128)
+    seq = meta.total_seq_length
+    q, k, v = (torch.randn(1, seq, 2, 8) for _ in range(3))
+    impl = _impl()
+    tq, tk, tv = (impl.tile(t, meta).clone() for t in (q, k, v))
+    called = False
+
+    def fake_vsa128(query, key, value, mask, variable_block_sizes):
+        nonlocal called
+        called = True
+        assert query.shape == key.shape == value.shape
+        assert mask.shape[-1] == variable_block_sizes.numel()
+        return torch.zeros_like(query), None
+
+    monkeypatch.setattr(vsa_h3, "block_sparse_attn_128_bshd", fake_vsa128)
+    output = impl.forward(tq, tk, tv, None, meta)
+
+    assert called
+    assert output.shape == tq.shape
+
+
 def test_sparsity_zero_matches_dense_sdpa_tile64():
     torch.manual_seed(2)
     meta = _build(_TINY64, tile_size=64)
@@ -241,7 +278,7 @@ def test_geometry_guard_enforces_tile64_bound():
 
 
 def test_builder_rejects_unknown_tile_size():
-    for bad in (0, 128, 512):
+    for bad in (0, 96, 512):
         with pytest.raises(ValueError, match="tile_size"):
             _build(_TINY, tile_size=bad)
 
