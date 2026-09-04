@@ -14,6 +14,8 @@ imported lazily only when this fastpath is selected.
 
 ``FASTVIDEO_VSA_TRITON=1`` (or the legacy
 ``FASTVIDEO_KERNEL_VSA_FORCE_TRITON=1``) forces Triton explicitly.
+``FASTVIDEO_VSA_TRITON_NATIVE_128=1`` opts inference-only 128-token calls
+into the native Triton kernel; gradient-enabled calls retain route A.
 """
 
 from __future__ import annotations
@@ -23,7 +25,11 @@ from typing import Tuple
 
 import torch
 
-from .block_sparse_attn import block_sparse_attn_triton, _force_triton
+from .block_sparse_attn import (
+    _force_triton,
+    block_sparse_attn_triton,
+    block_sparse_attn_triton_128_from_mask_inference,
+)
 
 # NOTE: ``block_sparse_attn_cute_fwd`` is imported lazily inside the CuTe
 # branches below. Importing it at module load would pull in the optional
@@ -47,6 +53,12 @@ def _resolve_backend() -> str:
     if os.environ.get("FASTVIDEO_VSA_CUTEDSL", "0") == "1":
         return "cutedsl"
     return "triton"
+
+
+def _use_native_triton_128(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> bool:
+    if os.environ.get("FASTVIDEO_VSA_TRITON_NATIVE_128", "0") != "1":
+        return False
+    return not (torch.is_grad_enabled() and any(tensor.requires_grad for tensor in (q, k, v)))
 
 
 def _expand_mask_and_sizes_128_to_64(
@@ -158,6 +170,14 @@ def block_sparse_attn_128(
         logical_block_map_128 = logical_block_map_128.unsqueeze(0)
 
     if _resolve_backend() == "triton":
+        if _use_native_triton_128(q, k, v):
+            return block_sparse_attn_triton_128_from_mask_inference(
+                q,
+                k,
+                v,
+                logical_block_map_128,
+                logical_variable_block_sizes_128,
+            )
         return _triton_via_route_a_128(q, k, v, logical_block_map_128, logical_variable_block_sizes_128)
 
     from .block_sparse_attn_cute_fwd import block_sparse_attn_cute_fwd
@@ -176,13 +196,25 @@ def block_sparse_attn_128_bshd(
         logical_block_map_128 = logical_block_map_128.unsqueeze(0)
 
     if _resolve_backend() == "triton":
-        out_bhsd, aux = _triton_via_route_a_128(
-            q.transpose(1, 2).contiguous(),
-            k.transpose(1, 2).contiguous(),
-            v.transpose(1, 2).contiguous(),
-            logical_block_map_128,
-            logical_variable_block_sizes_128,
-        )
+        q_bhsd = q.transpose(1, 2).contiguous()
+        k_bhsd = k.transpose(1, 2).contiguous()
+        v_bhsd = v.transpose(1, 2).contiguous()
+        if _use_native_triton_128(q, k, v):
+            out_bhsd, aux = block_sparse_attn_triton_128_from_mask_inference(
+                q_bhsd,
+                k_bhsd,
+                v_bhsd,
+                logical_block_map_128,
+                logical_variable_block_sizes_128,
+            )
+        else:
+            out_bhsd, aux = _triton_via_route_a_128(
+                q_bhsd,
+                k_bhsd,
+                v_bhsd,
+                logical_block_map_128,
+                logical_variable_block_sizes_128,
+            )
         return out_bhsd.transpose(1, 2).contiguous(), aux
 
     from .block_sparse_attn_cute_fwd import block_sparse_attn_cute_fwd_bshd

@@ -5,13 +5,16 @@ from __future__ import annotations
 import pytest
 import torch
 
-from fastvideo_kernel.block_sparse_attn_256 import _expand_mask_and_sizes_128_to_64
+from fastvideo_kernel.block_sparse_attn_256 import (
+    _expand_mask_and_sizes_128_to_64,
+    block_sparse_attn_128,
+)
 from fastvideo_kernel.triton_kernels.block_sparse_attn_triton import triton_block_sparse_attn_forward
 from fastvideo_kernel.triton_kernels.index import map_to_index
 
 
 @pytest.mark.cuda
-def test_native_vsa128_triton_matches_64_route_a() -> None:
+def test_native_vsa128_triton_matches_64_route_a(monkeypatch) -> None:
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required")
 
@@ -27,16 +30,10 @@ def test_native_vsa128_triton_matches_64_route_a() -> None:
     selected = scores.topk(topk, dim=-1).indices
     mask_128 = torch.zeros_like(scores, dtype=torch.bool).scatter_(-1, selected, True)
 
-    idx_128, num_128 = map_to_index(mask_128)
-    actual, _ = triton_block_sparse_attn_forward(
-        q,
-        k,
-        v,
-        idx_128,
-        num_128,
-        kv_sizes_128,
-        block_size=128,
-    )
+    monkeypatch.setenv("FASTVIDEO_VSA_TRITON", "1")
+    monkeypatch.setenv("FASTVIDEO_VSA_TRITON_NATIVE_128", "1")
+    with torch.inference_mode():
+        actual, _ = block_sparse_attn_128(q, k, v, mask_128, kv_sizes_128)
 
     mask_64, kv_sizes_64 = _expand_mask_and_sizes_128_to_64(mask_128, kv_sizes_128)
     idx_64, num_64 = map_to_index(mask_64)

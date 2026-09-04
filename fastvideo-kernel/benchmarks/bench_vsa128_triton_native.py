@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 from functools import partial
+import os
 
 import torch
 from triton.testing import do_bench
 
 from fastvideo_kernel.block_sparse_attn_256 import _expand_mask_and_sizes_128_to_64
+from fastvideo_kernel.ops import video_sparse_attn
 from fastvideo_kernel.triton_kernels.block_sparse_attn_triton import triton_block_sparse_attn_forward
 from fastvideo_kernel.triton_kernels.index import map_to_index
 
@@ -82,6 +84,9 @@ def main() -> None:
         raise ValueError("--sparsity must be in [0, 1)")
 
     torch.manual_seed(args.seed)
+    os.environ["FASTVIDEO_VSA_TRITON"] = "1"
+    os.environ.pop("FASTVIDEO_VSA_CUTEDSL", None)
+    os.environ.pop("FASTVIDEO_VSA_TRITON_NATIVE_128", None)
     device_name = torch.cuda.get_device_name(0)
     print(f"device={device_name}, heads={args.num_heads}, head_dim={args.head_dim}, sparsity={args.sparsity}")
     print("kernel excludes routing; routing excludes attention; total measures both")
@@ -107,6 +112,7 @@ def main() -> None:
         selected = scores.topk(topk_128, dim=-1).indices
         mask_128 = torch.zeros_like(scores, dtype=torch.bool).scatter_(-1, selected, True)
         sizes_128 = torch.full((blocks_128,), 128, dtype=torch.int32, device="cuda")
+        q_sizes_128 = torch.full((blocks_128,), 128, dtype=torch.int32, device="cuda")
 
         idx_128, num_128 = map_to_index(mask_128)
         mask_64, sizes_64 = _expand_mask_and_sizes_128_to_64(mask_128, sizes_128)
@@ -140,6 +146,25 @@ def main() -> None:
                 f"{seq_len}\t{topk_128}\t{phase}\t{route_64_ms:.4f}\t"
                 f"{native_128_ms:.4f}\t{route_64_ms / native_128_ms:.3f}x"
             )
+
+        operator = partial(
+            video_sparse_attn,
+            q,
+            k,
+            v,
+            sizes_128,
+            q_sizes_128,
+            topk_128,
+            block_size=(2, 8, 8),
+        )
+        os.environ.pop("FASTVIDEO_VSA_TRITON_NATIVE_128", None)
+        route_64_ms = do_bench(operator, warmup=args.warmup, rep=args.rep)
+        os.environ["FASTVIDEO_VSA_TRITON_NATIVE_128"] = "1"
+        native_128_ms = do_bench(operator, warmup=args.warmup, rep=args.rep)
+        print(
+            f"{seq_len}\t{topk_128}\toperator\t{route_64_ms:.4f}\t"
+            f"{native_128_ms:.4f}\t{route_64_ms / native_128_ms:.3f}x"
+        )
 
 
 if __name__ == "__main__":
