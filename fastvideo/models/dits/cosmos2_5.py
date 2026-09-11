@@ -20,6 +20,12 @@ from fastvideo.models.dits.base import BaseDiT
 from fastvideo.platforms import AttentionBackendEnum
 
 
+_COSMOS25_DENSE_ATTENTION_BACKENDS = (
+    AttentionBackendEnum.FLASH_ATTN,
+    AttentionBackendEnum.TORCH_SDPA,
+)
+
+
 class Cosmos25PatchEmbed(nn.Module):
     """
     COSMOS 2.5 patch embedding - converts video (B, C, T, H, W) to patches (B, T', H', W', D).
@@ -220,7 +226,11 @@ class Cosmos25SelfAttention(nn.Module):
         # Use DistributedAttention for flexible backend support (torch SDPA / FlashAttention)
         # For single-GPU (non-distributed), use LocalAttention to avoid distributed requirements
         if supported_attention_backends is None:
-            supported_attention_backends = (AttentionBackendEnum.FLASH_ATTN, AttentionBackendEnum.TORCH_SDPA)
+            supported_attention_backends = (
+                AttentionBackendEnum.ATTN_QAT_INFER,
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.TORCH_SDPA,
+            )
 
         # Always use DistributedAttention (requires distributed environment to be initialized)
         self.attn = DistributedAttention(num_heads=num_heads,
@@ -304,7 +314,12 @@ class Cosmos25CrossAttention(nn.Module):
         self.norm_k = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
 
         if supported_attention_backends is None:
-            supported_attention_backends = (AttentionBackendEnum.FLASH_ATTN, AttentionBackendEnum.TORCH_SDPA)
+            supported_attention_backends = _COSMOS25_DENSE_ATTENTION_BACKENDS
+        else:
+            supported_attention_backends = tuple(
+                backend for backend in supported_attention_backends if backend in _COSMOS25_DENSE_ATTENTION_BACKENDS)
+            if not supported_attention_backends:
+                supported_attention_backends = _COSMOS25_DENSE_ATTENTION_BACKENDS
 
         # Use LocalAttention for cross-attention since text embeddings are not sharded
         # in sequence parallelism (replicated across ranks)
@@ -313,6 +328,7 @@ class Cosmos25CrossAttention(nn.Module):
             head_size=self.head_dim,
             causal=False,
             supported_attention_backends=supported_attention_backends,
+            default_backend=AttentionBackendEnum.TORCH_SDPA,
         )
 
     def forward(
