@@ -490,6 +490,33 @@ print(f"compiled steady-state: {time.perf_counter() - t0:.2f}s")
 See `examples/inference/optimizations/torch_compile_example.py` for a
 baseline-vs-compile A/B with the warmup correctly excluded.
 
+### Cosmos Predict2.5 DFD matrix on DGX Spark
+
+Cosmos Predict2.5 DFD can combine DiT block compilation with the sm_121a
+Attn-QAT kernel. Its text cross-attention stays in BF16 Torch SDPA when
+`ATTN_QAT_INFER` is requested; only the much larger video self-attention uses
+FP4. This split avoids the cross-attention quality loss observed when both
+attention paths were quantized.
+
+Run the four arms in isolated processes with identical model, image, prompt,
+seed, shape, and sampling parameters:
+
+```bash
+python examples/inference/optimizations/cosmos2_5_dfd_matrix.py \
+  --model /path/to/Cosmos-Predict2.5-2B-DFD-FastVideo \
+  --image /path/to/conditioning-frame.png \
+  --arm all \
+  --warmups 1 \
+  --runs 2
+```
+
+The script writes per-arm videos, boundary images, timing/stage/memory receipts,
+and an aggregate `matrix.json` under `outputs/cosmos25_dfd_matrix/`. Review MP4
+encoding happens after the measured window, so its cost cannot skew one arm.
+Compilation is judged on measured requests after the warmup; the first compiled
+request is not a steady-state latency result. Review every boundary image and
+video before promoting FP4 or compiled output to a serving preset.
+
 ## Benchmarking different optimizations
 
 To benchmark backend performance, generate the same prompt with the same seed and compare end-to-end generation times:
