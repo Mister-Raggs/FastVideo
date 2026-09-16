@@ -22,9 +22,9 @@ from fastvideo.distributed import get_sp_group
 from fastvideo.logger import init_logger
 
 logger = init_logger(__name__)
-# VSA tile shape. The tile volume picks the kernel path automatically in
-# forward(): (4,4,4)=64 -> existing TK/Triton path (default, unchanged);
-# (4,8,8)=256 -> FA4 CuTe block-sparse attention fastpath (Blackwell).
+# Generic VSA tile shapes. The default (4,4,4)=64 route is unchanged;
+# (8,4,4)=128 lets inference compare expanded 64-token execution with the
+# opt-in native Triton 128-token kernel while preserving Wan's spatial tiles.
 VSA_TILE_SIZE = (4, 4, 4)
 VSA_TILE_SHAPES: dict[int, tuple[int, int, int]] = {
     64: VSA_TILE_SIZE,
