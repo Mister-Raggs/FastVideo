@@ -288,7 +288,7 @@ class Cosmos25DFDGenerationBackend:
         )
 
     def warmup(self, prompt: str) -> dict[str, float]:
-        """Exercise both T2W bootstrap and retained-frame DFD request shapes."""
+        """Prime compiled request shapes before the worker reports ready."""
         if not bool(self.model_config.get("startup_warmup", False)):
             print(f"[GPU {self.gpu_id}] Cosmos startup warmup skipped by runtime profile")
             return {
@@ -298,6 +298,26 @@ class Cosmos25DFDGenerationBackend:
         warmup_prompt = (prompt or "").strip()
         if not warmup_prompt:
             raise RuntimeError("Startup warmup prompt must be non-empty.")
+        if not bool(self.model_config.get("warmup_bootstrap", True)):
+            from PIL import Image
+
+            print(f"[GPU {self.gpu_id}] Cosmos startup warmup starting (synthetic DFD continuation only)")
+            started = time.perf_counter()
+            self.clear_conditioning()
+            self.continuation_image = Image.new(
+                "RGB",
+                (int(self.model_config["width"]), int(self.model_config["height"])),
+            )
+            continuation_result = self.generate_step(warmup_prompt, 2, None, False)
+            total_ms = (time.perf_counter() - started) * 1000.0
+            self.clear_conditioning()
+            continuation_ms = float(continuation_result.timings.get("e2e_latency_ms", 0.0))
+            print(f"[GPU {self.gpu_id}] Cosmos startup warmup complete: "
+                  f"continuation={continuation_ms:.0f}ms, total={total_ms:.0f}ms")
+            return {
+                "warmup_continuation_ms": continuation_ms,
+                "warmup_total_ms": total_ms,
+            }
         print(f"[GPU {self.gpu_id}] Cosmos startup warmup starting "
               "(synthetic segments: T2W bootstrap, DFD continuation)")
         started = time.perf_counter()

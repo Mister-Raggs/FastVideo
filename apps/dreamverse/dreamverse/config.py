@@ -107,10 +107,11 @@ MODEL_REGISTRY = {
         # the GB10-validated regional BF16 compile path.
         "continuation_lazy_module_load": False,
         "continuation_inference_torch_compile": True,
-        "continuation_compile_vae": False,
-        # Do not hide two full generated videos in server readiness. Compiled
-        # DFD pays its one-time capture on the first continuation instead.
-        "startup_warmup": False,
+        "continuation_compile_vae": True,
+        # Prewarm only the repeated compiled DFD path. T2W remains eager and
+        # pays no compile capture, so generating a bootstrap warmup is waste.
+        "startup_warmup": True,
+        "warmup_bootstrap": False,
         # Six sequential GB10 segments can exceed the legacy five-minute
         # DreamVerse lease even though the GPU is making progress.
         "session_timeout_seconds": 1800,
@@ -290,6 +291,11 @@ if MODEL_CONFIG.get("generation_backend") == "cosmos25_dfd":
         _env_bool(
             "DREAMVERSE_COSMOS25_STARTUP_WARMUP",
             cast(bool, MODEL_CONFIG["startup_warmup"]),
+        ),
+        "warmup_bootstrap":
+        _env_bool(
+            "DREAMVERSE_COSMOS25_WARMUP_BOOTSTRAP",
+            cast(bool, MODEL_CONFIG["warmup_bootstrap"]),
         ),
     }
 

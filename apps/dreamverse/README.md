@@ -177,19 +177,21 @@ dreamverse-server --host 0.0.0.0 --port 8009
 The backend loads both model roles before reporting ready. Both use BF16, Torch
 SDPA, 704x1280 output, 24 FPS, and four steps. On unified-memory GB10 systems,
 the one-use T2W role loads lazily and releases its components after bootstrap;
-the repeatedly used DFD role stays resident and uses regional DiT compile. It
-also skips the two generated startup warmups by default; the first real request
-is therefore a cold request. Bootstrap segments contain 77 frames. DFD segments
-contain 81 decoded frames, but Dreamverse drops the repeated conditioning frame
-before streaming, leaving 80 new frames. An initial user image selects DFD
-immediately without treating that first frame as a cross-segment overlap.
+the repeatedly used DFD role stays resident and uses regional DiT plus decoder
+compile. Before reporting ready, the backend warms only DFD with a synthetic
+conditioning frame; it does not spend another full generation warming eager
+T2W. Bootstrap segments contain 77 frames. DFD segments contain 81 decoded
+frames, but Dreamverse drops the repeated conditioning frame before streaming,
+leaving 80 new frames. An initial user image selects DFD immediately without
+treating that first frame as a cross-segment overlap.
 
 The runtime profile can be changed without editing the registry:
 
 ```bash
 export DREAMVERSE_COSMOS25_LAZY_MODULE_LOAD=1        # reproduce the old GB10 policy
 export DREAMVERSE_COSMOS25_INFERENCE_TORCH_COMPILE=1 # regional BF16 DiT compile
-export DREAMVERSE_COSMOS25_STARTUP_WARMUP=1          # warm both generation paths
+export DREAMVERSE_COSMOS25_STARTUP_WARMUP=1          # warm compiled DFD before ready
+export DREAMVERSE_COSMOS25_WARMUP_BOOTSTRAP=1        # optionally warm eager T2W too
 export DREAMVERSE_COSMOS25_ATTENTION_BACKEND=flash_attn
 ```
 
@@ -199,9 +201,9 @@ The two shared lifecycle variables override both roles. More specific
 are `LAZY_MODULE_LOAD` and `INFERENCE_TORCH_COMPILE`.
 
 `DREAMVERSE_COSMOS25_BOOTSTRAP_COMPILE_VAE` and
-`DREAMVERSE_COSMOS25_CONTINUATION_COMPILE_VAE` are experimental decoder-only
-compile gates. They remain disabled until the fixed-shape GB10 decode benchmark
-demonstrates a warm latency win and decoded-frame parity.
+`DREAMVERSE_COSMOS25_CONTINUATION_COMPILE_VAE` control decoder-only compile.
+Continuation decode compile is enabled in the optimized profile; bootstrap
+decode compile remains off.
 
 Use benchmark selection `--arm decode` to compare the validated hybrid profile
 with the otherwise-identical continuation VAE-compile arm.
@@ -211,6 +213,11 @@ from 147.25 to 125.17 seconds (15.0%). Its decoded all-frame sample measured
 48.18 dB PSNR and 0.45 mean absolute pixel error against eager SDPA, and passed
 visual review. The profile does not change the model weights, four-step
 schedule, attention implementation, seed, resolution, or frame count.
+Compiling the decoder then reduced its stage from 45.23 to 25.07 seconds and
+the same-profile request from 120.09 to 111.27 seconds. The decoded sample had
+61.69 dB PSNR, 0.044 mean absolute pixel error, a maximum error of one, and
+passed visual review. Its first warmup took 214.74 seconds and peak memory rose
+from 37.58 to 51.71 GB, so deployment warmup is part of this profile.
 
 The profile uses a 30-minute session lease because sequential generation on
 GB10-class hardware can exceed Dreamverse's five-minute default while the GPU

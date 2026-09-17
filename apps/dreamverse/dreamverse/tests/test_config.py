@@ -234,8 +234,9 @@ def test_config_registers_cosmos25_dfd_profile(monkeypatch):
         "bootstrap_compile_vae": False,
         "continuation_lazy_module_load": False,
         "continuation_inference_torch_compile": True,
-        "continuation_compile_vae": False,
-        "startup_warmup": False,
+        "continuation_compile_vae": True,
+        "startup_warmup": True,
+        "warmup_bootstrap": False,
         "session_timeout_seconds": 1800,
     }
 
@@ -269,6 +270,7 @@ def test_config_allows_cosmos25_runtime_profile_overrides(monkeypatch):
     monkeypatch.setenv("DREAMVERSE_COSMOS25_BOOTSTRAP_COMPILE_VAE", "true")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_CONTINUATION_COMPILE_VAE", "true")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_STARTUP_WARMUP", "true")
+    monkeypatch.setenv("DREAMVERSE_COSMOS25_WARMUP_BOOTSTRAP", "true")
 
     module = _load_config_module()
 
@@ -280,6 +282,7 @@ def test_config_allows_cosmos25_runtime_profile_overrides(monkeypatch):
     assert module.MODEL_CONFIG["bootstrap_compile_vae"] is True
     assert module.MODEL_CONFIG["continuation_compile_vae"] is True
     assert module.MODEL_CONFIG["startup_warmup"] is True
+    assert module.MODEL_CONFIG["warmup_bootstrap"] is True
 
 
 def test_config_keeps_shared_cosmos25_lifecycle_overrides_compatible(monkeypatch):

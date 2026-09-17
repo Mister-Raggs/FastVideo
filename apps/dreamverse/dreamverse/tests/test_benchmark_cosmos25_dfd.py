@@ -58,6 +58,13 @@ def test_decode_matrix_changes_only_continuation_vae_compile() -> None:
     assert eager.__dict__ | {"name": compiled.name, "continuation_compile_vae": True} == compiled.__dict__
 
 
+def test_production_matrix_compares_original_and_stacked_profile() -> None:
+    assert benchmark._selected_arms("production") == (
+        "lazy_sdpa",
+        "hybrid_sdpa_regional_vae",
+    )
+
+
 def test_model_config_keeps_the_generation_contract_fixed(tmp_path) -> None:
     args = _args(tmp_path)
 

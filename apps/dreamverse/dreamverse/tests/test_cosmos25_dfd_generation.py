@@ -30,6 +30,7 @@ COSMOS_CONFIG = {
     "continuation_inference_torch_compile": True,
     "continuation_compile_vae": False,
     "startup_warmup": True,
+    "warmup_bootstrap": True,
 }
 
 
@@ -225,6 +226,22 @@ def test_warmup_can_skip_full_startup_generations(backend):
         "warmup_skipped": 1.0,
         "warmup_total_ms": 0.0,
     }
+
+
+def test_warmup_can_prime_only_compiled_continuation(backend):
+    backend.model_config["warmup_bootstrap"] = False
+
+    timings = backend.warmup("warmup prompt")
+
+    assert backend.bootstrap_generator.calls == []
+    assert len(backend.continuation_generator.calls) == 1
+    conditioning = backend.continuation_generator.calls[0]["conditioning_pixels"]
+    assert conditioning.shape == (704, 1280, 3)
+    assert np.count_nonzero(conditioning) == 0
+    assert backend.continuation_image is None
+    assert "warmup_bootstrap_ms" not in timings
+    assert "warmup_continuation_ms" in timings
+    assert "warmup_total_ms" in timings
 
 
 def test_stage_timings_are_exposed_in_step_receipt(backend):
