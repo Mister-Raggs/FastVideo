@@ -22,7 +22,6 @@ from fastvideo.entrypoints.video_generator import VideoGenerator, _resolve_outpu
 from fastvideo.fastvideo_args import WorkloadType
 from fastvideo.pipelines import ForwardBatch
 from fastvideo.worker.gpu_worker import Worker
-from fastvideo.worker.ray_distributed_executor import RayDistributedExecutor
 
 
 def _new_video_generator() -> VideoGenerator:
@@ -488,6 +487,8 @@ def test_generate_single_video_audio_only_save_skips_placeholder_materialization
 
 
 def test_generate_single_video_ray_audio_only_save_preserves_worker_metadata(monkeypatch, tmp_path):
+    from fastvideo.worker.ray_distributed_executor import RayDistributedExecutor
+
     audio = torch.zeros((16, ), dtype=torch.float32)
     worker_output = ForwardBatch(
         data_type="audio",
