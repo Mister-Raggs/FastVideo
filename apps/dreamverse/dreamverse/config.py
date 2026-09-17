@@ -98,15 +98,16 @@ MODEL_REGISTRY = {
         "fps": 24,
         "num_inference_steps": 4,
         "seed": 42,
-        # Unlike 35B FastH3, both Cosmos 2B roles fit together on GB10.
-        # Keeping their components resident avoids per-segment checkpoint
-        # materialization by FastVideo's unified-memory auto policy.
-        "lazy_module_load": False,
-        # Regional compile is quality-preserving but stays opt-in until the
-        # GB10 matrix establishes its steady-state latency and warmup cost.
-        "inference_torch_compile": False,
-        # Eager resident inference has no shape-specific compile requirement;
-        # do not hide two full generated videos in server readiness.
+        # T2W runs once per session; defer and release it after bootstrap so
+        # its Reason1/DiT/VAE stack does not compete with repeated DFD work.
+        "bootstrap_lazy_module_load": True,
+        "bootstrap_inference_torch_compile": False,
+        # The DFD stack serves every continuation. Keep it resident and use
+        # the GB10-validated regional BF16 compile path.
+        "continuation_lazy_module_load": False,
+        "continuation_inference_torch_compile": True,
+        # Do not hide two full generated videos in server readiness. Compiled
+        # DFD pays its one-time capture on the first continuation instead.
         "startup_warmup": False,
         # Six sequential GB10 segments can exceed the legacy five-minute
         # DreamVerse lease even though the GPU is making progress.
@@ -233,6 +234,18 @@ if DREAMVERSE_COSMOS25_DFD_MODEL_PATH and MODEL_CONFIG.get("generation_backend")
     }
 
 if MODEL_CONFIG.get("generation_backend") == "cosmos25_dfd":
+    bootstrap_lazy_default = cast(bool, MODEL_CONFIG["bootstrap_lazy_module_load"])
+    continuation_lazy_default = cast(bool, MODEL_CONFIG["continuation_lazy_module_load"])
+    bootstrap_compile_default = cast(bool, MODEL_CONFIG["bootstrap_inference_torch_compile"])
+    continuation_compile_default = cast(bool, MODEL_CONFIG["continuation_inference_torch_compile"])
+    if os.getenv("DREAMVERSE_COSMOS25_LAZY_MODULE_LOAD") is not None:
+        shared_lazy_default = _env_bool("DREAMVERSE_COSMOS25_LAZY_MODULE_LOAD", continuation_lazy_default)
+        bootstrap_lazy_default = shared_lazy_default
+        continuation_lazy_default = shared_lazy_default
+    if os.getenv("DREAMVERSE_COSMOS25_INFERENCE_TORCH_COMPILE") is not None:
+        shared_compile_default = _env_bool("DREAMVERSE_COSMOS25_INFERENCE_TORCH_COMPILE", continuation_compile_default)
+        bootstrap_compile_default = shared_compile_default
+        continuation_compile_default = shared_compile_default
     MODEL_CONFIG = {
         **MODEL_CONFIG,
         "attention_backend":
@@ -241,15 +254,25 @@ if MODEL_CONFIG.get("generation_backend") == "cosmos25_dfd":
             cast(str, MODEL_CONFIG["attention_backend"]),
             ("torch_sdpa", "flash_attn"),
         ).upper(),
-        "lazy_module_load":
+        "bootstrap_lazy_module_load":
         _env_bool(
-            "DREAMVERSE_COSMOS25_LAZY_MODULE_LOAD",
-            cast(bool, MODEL_CONFIG["lazy_module_load"]),
+            "DREAMVERSE_COSMOS25_BOOTSTRAP_LAZY_MODULE_LOAD",
+            bootstrap_lazy_default,
         ),
-        "inference_torch_compile":
+        "continuation_lazy_module_load":
         _env_bool(
-            "DREAMVERSE_COSMOS25_INFERENCE_TORCH_COMPILE",
-            cast(bool, MODEL_CONFIG["inference_torch_compile"]),
+            "DREAMVERSE_COSMOS25_CONTINUATION_LAZY_MODULE_LOAD",
+            continuation_lazy_default,
+        ),
+        "bootstrap_inference_torch_compile":
+        _env_bool(
+            "DREAMVERSE_COSMOS25_BOOTSTRAP_INFERENCE_TORCH_COMPILE",
+            bootstrap_compile_default,
+        ),
+        "continuation_inference_torch_compile":
+        _env_bool(
+            "DREAMVERSE_COSMOS25_CONTINUATION_INFERENCE_TORCH_COMPILE",
+            continuation_compile_default,
         ),
         "startup_warmup":
         _env_bool(

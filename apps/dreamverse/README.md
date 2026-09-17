@@ -176,13 +176,13 @@ dreamverse-server --host 0.0.0.0 --port 8009
 
 The backend loads both model roles before reporting ready. Both use BF16, Torch
 SDPA, 704x1280 output, 24 FPS, and four steps. On unified-memory GB10 systems,
-the Cosmos profile explicitly keeps both 2B roles resident instead of applying
-FastVideo's generic per-request lazy module loading policy. It also skips the
-two generated startup warmups by default; the first real request is therefore
-a cold request. Bootstrap segments contain 77 frames. DFD segments contain 81
-decoded frames, but Dreamverse drops the repeated conditioning frame before
-streaming, leaving 80 new frames. An initial user image selects DFD immediately
-without treating that first frame as a cross-segment overlap.
+the one-use T2W role loads lazily and releases its components after bootstrap;
+the repeatedly used DFD role stays resident and uses regional DiT compile. It
+also skips the two generated startup warmups by default; the first real request
+is therefore a cold request. Bootstrap segments contain 77 frames. DFD segments
+contain 81 decoded frames, but Dreamverse drops the repeated conditioning frame
+before streaming, leaving 80 new frames. An initial user image selects DFD
+immediately without treating that first frame as a cross-segment overlap.
 
 The runtime profile can be changed without editing the registry:
 
@@ -193,10 +193,16 @@ export DREAMVERSE_COSMOS25_STARTUP_WARMUP=1          # warm both generation path
 export DREAMVERSE_COSMOS25_ATTENTION_BACKEND=flash_attn
 ```
 
-Regional compile and FlashAttention are opt-in until their latency and decoded
-output pass the benchmark's numerical and visual gates. The default does not
-change the model weights, four-step schedule, attention implementation, seed,
-resolution, or frame count.
+The two shared lifecycle variables override both roles. More specific
+`DREAMVERSE_COSMOS25_BOOTSTRAP_*` and
+`DREAMVERSE_COSMOS25_CONTINUATION_*` variants override one role; their suffixes
+are `LAZY_MODULE_LOAD` and `INFERENCE_TORCH_COMPILE`.
+
+On a GB10 DFD continuation, regional compile reduced a correct-input request
+from 147.25 to 125.17 seconds (15.0%). Its decoded all-frame sample measured
+48.18 dB PSNR and 0.45 mean absolute pixel error against eager SDPA, and passed
+visual review. The profile does not change the model weights, four-step
+schedule, attention implementation, seed, resolution, or frame count.
 
 The profile uses a 30-minute session lease because sequential generation on
 GB10-class hardware can exceed Dreamverse's five-minute default while the GPU

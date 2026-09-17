@@ -23,8 +23,10 @@ COSMOS_CONFIG = {
     "fps": 24,
     "num_inference_steps": 4,
     "seed": 42,
-    "lazy_module_load": False,
-    "inference_torch_compile": False,
+    "bootstrap_lazy_module_load": True,
+    "bootstrap_inference_torch_compile": False,
+    "continuation_lazy_module_load": False,
+    "continuation_inference_torch_compile": True,
     "startup_warmup": True,
 }
 
@@ -106,7 +108,7 @@ def test_initialize_loads_both_package_roles(monkeypatch):
         (
             "/models/cosmos25-t2w",
             {
-                "lazy_module_load": False,
+                "lazy_module_load": True,
                 "inference_torch_compile": False,
             },
         ),
@@ -114,7 +116,7 @@ def test_initialize_loads_both_package_roles(monkeypatch):
             "/models/cosmos25-dfd",
             {
                 "lazy_module_load": False,
-                "inference_torch_compile": False,
+                "inference_torch_compile": True,
             },
         ),
     ]

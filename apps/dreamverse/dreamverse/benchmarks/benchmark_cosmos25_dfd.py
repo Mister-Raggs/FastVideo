@@ -11,6 +11,8 @@ The ``core`` matrix answers the first production question cheaply:
 * ``lazy_sdpa`` reproduces GB10's prior automatic per-request module reload.
 * ``resident_sdpa`` keeps both Cosmos 2B stacks resident.
 * ``resident_sdpa_regional`` adds per-transformer-block regional compile.
+* ``hybrid_sdpa_regional`` leaves the one-use T2W stack lazy while keeping the
+  repeated DFD stack resident and compiled.
 
 The optional FlashAttention arms retain BF16 and are subject to decoded-frame
 parity plus visual review before promotion.
@@ -37,18 +39,21 @@ DEFAULT_PROMPT = ("The same red Dodge Challenger approaches a sweeping bend and 
 class Arm:
     name: str
     attention_backend: str
-    lazy_module_load: bool
-    inference_torch_compile: bool
+    bootstrap_lazy_module_load: bool
+    continuation_lazy_module_load: bool
+    bootstrap_inference_torch_compile: bool
+    continuation_inference_torch_compile: bool
 
 
 ARMS = {
-    "lazy_sdpa": Arm("lazy_sdpa", "TORCH_SDPA", True, False),
-    "resident_sdpa": Arm("resident_sdpa", "TORCH_SDPA", False, False),
-    "resident_sdpa_regional": Arm("resident_sdpa_regional", "TORCH_SDPA", False, True),
-    "resident_flash": Arm("resident_flash", "FLASH_ATTN", False, False),
-    "resident_flash_regional": Arm("resident_flash_regional", "FLASH_ATTN", False, True),
+    "lazy_sdpa": Arm("lazy_sdpa", "TORCH_SDPA", True, True, False, False),
+    "resident_sdpa": Arm("resident_sdpa", "TORCH_SDPA", False, False, False, False),
+    "resident_sdpa_regional": Arm("resident_sdpa_regional", "TORCH_SDPA", False, False, True, True),
+    "hybrid_sdpa_regional": Arm("hybrid_sdpa_regional", "TORCH_SDPA", True, False, False, True),
+    "resident_flash": Arm("resident_flash", "FLASH_ATTN", False, False, False, False),
+    "resident_flash_regional": Arm("resident_flash_regional", "FLASH_ATTN", False, False, True, True),
 }
-CORE_ARMS = ("lazy_sdpa", "resident_sdpa", "resident_sdpa_regional")
+CORE_ARMS = ("lazy_sdpa", "resident_sdpa_regional", "hybrid_sdpa_regional")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -169,8 +174,10 @@ def _model_config(args: argparse.Namespace, arm: Arm) -> dict[str, Any]:
         "fps": args.fps,
         "num_inference_steps": 4,
         "seed": args.seed,
-        "lazy_module_load": arm.lazy_module_load,
-        "inference_torch_compile": arm.inference_torch_compile,
+        "bootstrap_lazy_module_load": arm.bootstrap_lazy_module_load,
+        "continuation_lazy_module_load": arm.continuation_lazy_module_load,
+        "bootstrap_inference_torch_compile": arm.bootstrap_inference_torch_compile,
+        "continuation_inference_torch_compile": arm.continuation_inference_torch_compile,
         # The harness owns warmup so its cost is measured separately.
         "startup_warmup": False,
     }
@@ -261,7 +268,10 @@ def _run_arm(args: argparse.Namespace, arm: Arm) -> dict[str, Any]:
 
     print(
         f"[{arm.name}] role={args.role} attention={arm.attention_backend} "
-        f"lazy={arm.lazy_module_load} regional_compile={arm.inference_torch_compile}",
+        f"bootstrap(lazy={arm.bootstrap_lazy_module_load}, "
+        f"regional_compile={arm.bootstrap_inference_torch_compile}) "
+        f"continuation(lazy={arm.continuation_lazy_module_load}, "
+        f"regional_compile={arm.continuation_inference_torch_compile})",
         flush=True)
     initialize_started = time.perf_counter()
     backend.initialize(_model_config(args, arm))

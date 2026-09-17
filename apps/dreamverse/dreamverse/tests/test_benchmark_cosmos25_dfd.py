@@ -33,13 +33,15 @@ def _args(tmp_path) -> Namespace:
 def test_core_matrix_is_quality_safe_and_residency_focused() -> None:
     assert benchmark._selected_arms("core") == (
         "lazy_sdpa",
-        "resident_sdpa",
         "resident_sdpa_regional",
+        "hybrid_sdpa_regional",
     )
     assert all(benchmark.ARMS[name].attention_backend == "TORCH_SDPA" for name in benchmark.CORE_ARMS)
-    assert benchmark.ARMS["lazy_sdpa"].lazy_module_load is True
-    assert benchmark.ARMS["resident_sdpa"].lazy_module_load is False
-    assert benchmark.ARMS["resident_sdpa_regional"].inference_torch_compile is True
+    assert benchmark.ARMS["lazy_sdpa"].continuation_lazy_module_load is True
+    assert benchmark.ARMS["resident_sdpa"].continuation_lazy_module_load is False
+    assert benchmark.ARMS["resident_sdpa_regional"].continuation_inference_torch_compile is True
+    assert benchmark.ARMS["hybrid_sdpa_regional"].bootstrap_lazy_module_load is True
+    assert benchmark.ARMS["hybrid_sdpa_regional"].bootstrap_inference_torch_compile is False
 
 
 def test_model_config_keeps_the_generation_contract_fixed(tmp_path) -> None:
@@ -53,8 +55,10 @@ def test_model_config_keeps_the_generation_contract_fixed(tmp_path) -> None:
     assert config["continuation_num_frames"] == 81
     assert config["num_inference_steps"] == 4
     assert config["seed"] == 42
-    assert config["lazy_module_load"] is False
-    assert config["inference_torch_compile"] is True
+    assert config["bootstrap_lazy_module_load"] is False
+    assert config["continuation_lazy_module_load"] is False
+    assert config["bootstrap_inference_torch_compile"] is True
+    assert config["continuation_inference_torch_compile"] is True
     assert config["startup_warmup"] is False
 
 

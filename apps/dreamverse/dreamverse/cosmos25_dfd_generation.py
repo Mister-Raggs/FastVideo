@@ -85,25 +85,33 @@ class Cosmos25DFDGenerationBackend:
         bootstrap_path = _required_config_str(self.model_config, "model_path")
         continuation_path = _required_config_str(self.model_config, "continuation_model_path")
         attention_backend = _required_config_str(self.model_config, "attention_backend")
-        lazy_module_load = bool(self.model_config.get("lazy_module_load", False))
-        inference_torch_compile = bool(self.model_config.get("inference_torch_compile", False))
+        legacy_lazy_module_load = bool(self.model_config.get("lazy_module_load", False))
+        legacy_regional_compile = bool(self.model_config.get("inference_torch_compile", False))
+        bootstrap_lazy_module_load = bool(self.model_config.get("bootstrap_lazy_module_load", legacy_lazy_module_load))
+        continuation_lazy_module_load = bool(
+            self.model_config.get("continuation_lazy_module_load", legacy_lazy_module_load))
+        bootstrap_regional_compile = bool(
+            self.model_config.get("bootstrap_inference_torch_compile", legacy_regional_compile))
+        continuation_regional_compile = bool(
+            self.model_config.get("continuation_inference_torch_compile", legacy_regional_compile))
         self._configure_environment(attention_backend)
 
-        print(f"[GPU {self.gpu_id}] Cosmos runtime profile: "
-              f"attention={attention_backend}, lazy_module_load={lazy_module_load}, "
-              f"regional_compile={inference_torch_compile}")
+        print(f"[GPU {self.gpu_id}] Cosmos runtime profile: attention={attention_backend}, "
+              f"bootstrap(lazy={bootstrap_lazy_module_load}, regional_compile={bootstrap_regional_compile}), "
+              f"continuation(lazy={continuation_lazy_module_load}, "
+              f"regional_compile={continuation_regional_compile})")
         print(f"[GPU {self.gpu_id}] Loading Cosmos T2W bootstrap: {bootstrap_path}")
         print(f"[GPU {self.gpu_id}] Before bootstrap load: {self._gpu_mem()}")
         self.bootstrap_generator = self._load_generator(
             bootstrap_path,
-            lazy_module_load=lazy_module_load,
-            inference_torch_compile=inference_torch_compile,
+            lazy_module_load=bootstrap_lazy_module_load,
+            inference_torch_compile=bootstrap_regional_compile,
         )
         print(f"[GPU {self.gpu_id}] Loading Cosmos DFD continuation: {continuation_path}")
         self.continuation_generator = self._load_generator(
             continuation_path,
-            lazy_module_load=lazy_module_load,
-            inference_torch_compile=inference_torch_compile,
+            lazy_module_load=continuation_lazy_module_load,
+            inference_torch_compile=continuation_regional_compile,
         )
         print(f"[GPU {self.gpu_id}] Cosmos T2W + DFD loaded: {self._gpu_mem()} (warmup pending)")
 
