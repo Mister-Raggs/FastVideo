@@ -219,6 +219,12 @@ the same-profile request from 120.09 to 111.27 seconds. The decoded sample had
 passed visual review. Its first warmup took 214.74 seconds and peak memory rose
 from 37.58 to 51.71 GB, so deployment warmup is part of this profile.
 
+The final paired production matrix measured the original lazy BF16 SDPA profile
+at 144.12 seconds and the complete hybrid + regional DiT + compiled-decoder
+profile at 106.39 seconds: 26.2% lower continuation latency (1.35x
+throughput-equivalent). Decoded output measured 48.18 dB PSNR against the
+original profile and the component visual gates passed.
+
 The profile uses a 30-minute session lease because sequential generation on
 GB10-class hardware can exceed Dreamverse's five-minute default while the GPU
 is still making progress. Deployments can override the lease with
