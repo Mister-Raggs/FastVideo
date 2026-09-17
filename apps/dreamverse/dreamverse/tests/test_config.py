@@ -231,8 +231,10 @@ def test_config_registers_cosmos25_dfd_profile(monkeypatch):
         "seed": 42,
         "bootstrap_lazy_module_load": True,
         "bootstrap_inference_torch_compile": False,
+        "bootstrap_compile_vae": False,
         "continuation_lazy_module_load": False,
         "continuation_inference_torch_compile": True,
+        "continuation_compile_vae": False,
         "startup_warmup": False,
         "session_timeout_seconds": 1800,
     }
@@ -264,6 +266,8 @@ def test_config_allows_cosmos25_runtime_profile_overrides(monkeypatch):
     monkeypatch.setenv("DREAMVERSE_COSMOS25_CONTINUATION_LAZY_MODULE_LOAD", "true")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_BOOTSTRAP_INFERENCE_TORCH_COMPILE", "true")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_CONTINUATION_INFERENCE_TORCH_COMPILE", "false")
+    monkeypatch.setenv("DREAMVERSE_COSMOS25_BOOTSTRAP_COMPILE_VAE", "true")
+    monkeypatch.setenv("DREAMVERSE_COSMOS25_CONTINUATION_COMPILE_VAE", "true")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_STARTUP_WARMUP", "true")
 
     module = _load_config_module()
@@ -273,6 +277,8 @@ def test_config_allows_cosmos25_runtime_profile_overrides(monkeypatch):
     assert module.MODEL_CONFIG["continuation_lazy_module_load"] is True
     assert module.MODEL_CONFIG["bootstrap_inference_torch_compile"] is True
     assert module.MODEL_CONFIG["continuation_inference_torch_compile"] is False
+    assert module.MODEL_CONFIG["bootstrap_compile_vae"] is True
+    assert module.MODEL_CONFIG["continuation_compile_vae"] is True
     assert module.MODEL_CONFIG["startup_warmup"] is True
 
 

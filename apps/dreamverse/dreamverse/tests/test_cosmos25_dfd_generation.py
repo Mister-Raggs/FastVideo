@@ -25,8 +25,10 @@ COSMOS_CONFIG = {
     "seed": 42,
     "bootstrap_lazy_module_load": True,
     "bootstrap_inference_torch_compile": False,
+    "bootstrap_compile_vae": False,
     "continuation_lazy_module_load": False,
     "continuation_inference_torch_compile": True,
+    "continuation_compile_vae": False,
     "startup_warmup": True,
 }
 
@@ -110,6 +112,7 @@ def test_initialize_loads_both_package_roles(monkeypatch):
             {
                 "lazy_module_load": True,
                 "inference_torch_compile": False,
+                "compile_vae": False,
             },
         ),
         (
@@ -117,6 +120,7 @@ def test_initialize_loads_both_package_roles(monkeypatch):
             {
                 "lazy_module_load": False,
                 "inference_torch_compile": True,
+                "compile_vae": False,
             },
         ),
     ]

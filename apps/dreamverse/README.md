@@ -198,6 +198,11 @@ The two shared lifecycle variables override both roles. More specific
 `DREAMVERSE_COSMOS25_CONTINUATION_*` variants override one role; their suffixes
 are `LAZY_MODULE_LOAD` and `INFERENCE_TORCH_COMPILE`.
 
+`DREAMVERSE_COSMOS25_BOOTSTRAP_COMPILE_VAE` and
+`DREAMVERSE_COSMOS25_CONTINUATION_COMPILE_VAE` are experimental decoder-only
+compile gates. They remain disabled until the fixed-shape GB10 decode benchmark
+demonstrates a warm latency win and decoded-frame parity.
+
 On a GB10 DFD continuation, regional compile reduced a correct-input request
 from 147.25 to 125.17 seconds (15.0%). Its decoded all-frame sample measured
 48.18 dB PSNR and 0.45 mean absolute pixel error against eager SDPA, and passed

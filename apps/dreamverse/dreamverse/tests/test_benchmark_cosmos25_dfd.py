@@ -42,6 +42,8 @@ def test_core_matrix_is_quality_safe_and_residency_focused() -> None:
     assert benchmark.ARMS["resident_sdpa_regional"].continuation_inference_torch_compile is True
     assert benchmark.ARMS["hybrid_sdpa_regional"].bootstrap_lazy_module_load is True
     assert benchmark.ARMS["hybrid_sdpa_regional"].bootstrap_inference_torch_compile is False
+    assert benchmark.ARMS["hybrid_sdpa_regional"].continuation_compile_vae is False
+    assert benchmark.ARMS["hybrid_sdpa_regional_vae"].continuation_compile_vae is True
 
 
 def test_model_config_keeps_the_generation_contract_fixed(tmp_path) -> None:
@@ -59,6 +61,8 @@ def test_model_config_keeps_the_generation_contract_fixed(tmp_path) -> None:
     assert config["continuation_lazy_module_load"] is False
     assert config["bootstrap_inference_torch_compile"] is True
     assert config["continuation_inference_torch_compile"] is True
+    assert config["bootstrap_compile_vae"] is False
+    assert config["continuation_compile_vae"] is False
     assert config["startup_warmup"] is False
 
 

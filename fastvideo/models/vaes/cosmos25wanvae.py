@@ -507,6 +507,17 @@ def _count_cosmos25_conv3d(model: nn.Module) -> int:
     return sum(1 for m in model.modules() if isinstance(m, Cosmos25CausalConv3d))
 
 
+def _is_cosmos25_vae_decoder(name: str, submodule: nn.Module) -> bool:
+    """Match the decoder actually called by ``Cosmos25WanVAE.decode``.
+
+    The composed pipeline's full-module compile fallback wraps ``forward``,
+    but this VAE exposes encode/decode methods and never calls its module
+    forward. Compiling the decoder in place ensures DecodingStage reaches the
+    optimized region while leaving one-frame conditioning encode unchanged.
+    """
+    return name == "decoder" and isinstance(submodule, Cosmos25Decoder3d)
+
+
 class Cosmos25WanVAE(nn.Module):
     """
     A FastVideo-native copy of the *official-like* Wan2.1 VAE core.
@@ -520,6 +531,7 @@ class Cosmos25WanVAE(nn.Module):
 
     handles_latent_norm: bool = True
     handles_latent_denorm: bool = True
+    _compile_conditions = [_is_cosmos25_vae_decoder]
 
     def __init__(
         self,

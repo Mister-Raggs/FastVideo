@@ -43,6 +43,8 @@ class Arm:
     continuation_lazy_module_load: bool
     bootstrap_inference_torch_compile: bool
     continuation_inference_torch_compile: bool
+    bootstrap_compile_vae: bool = False
+    continuation_compile_vae: bool = False
 
 
 ARMS = {
@@ -50,6 +52,16 @@ ARMS = {
     "resident_sdpa": Arm("resident_sdpa", "TORCH_SDPA", False, False, False, False),
     "resident_sdpa_regional": Arm("resident_sdpa_regional", "TORCH_SDPA", False, False, True, True),
     "hybrid_sdpa_regional": Arm("hybrid_sdpa_regional", "TORCH_SDPA", True, False, False, True),
+    "hybrid_sdpa_regional_vae": Arm(
+        "hybrid_sdpa_regional_vae",
+        "TORCH_SDPA",
+        True,
+        False,
+        False,
+        True,
+        False,
+        True,
+    ),
     "resident_flash": Arm("resident_flash", "FLASH_ATTN", False, False, False, False),
     "resident_flash_regional": Arm("resident_flash_regional", "FLASH_ATTN", False, False, True, True),
 }
@@ -178,6 +190,8 @@ def _model_config(args: argparse.Namespace, arm: Arm) -> dict[str, Any]:
         "continuation_lazy_module_load": arm.continuation_lazy_module_load,
         "bootstrap_inference_torch_compile": arm.bootstrap_inference_torch_compile,
         "continuation_inference_torch_compile": arm.continuation_inference_torch_compile,
+        "bootstrap_compile_vae": arm.bootstrap_compile_vae,
+        "continuation_compile_vae": arm.continuation_compile_vae,
         # The harness owns warmup so its cost is measured separately.
         "startup_warmup": False,
     }
@@ -271,7 +285,8 @@ def _run_arm(args: argparse.Namespace, arm: Arm) -> dict[str, Any]:
         f"bootstrap(lazy={arm.bootstrap_lazy_module_load}, "
         f"regional_compile={arm.bootstrap_inference_torch_compile}) "
         f"continuation(lazy={arm.continuation_lazy_module_load}, "
-        f"regional_compile={arm.continuation_inference_torch_compile})",
+        f"regional_compile={arm.continuation_inference_torch_compile}) "
+        f"vae_compile=(bootstrap={arm.bootstrap_compile_vae}, continuation={arm.continuation_compile_vae})",
         flush=True)
     initialize_started = time.perf_counter()
     backend.initialize(_model_config(args, arm))

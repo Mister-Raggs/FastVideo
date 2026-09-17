@@ -102,10 +102,12 @@ MODEL_REGISTRY = {
         # its Reason1/DiT/VAE stack does not compete with repeated DFD work.
         "bootstrap_lazy_module_load": True,
         "bootstrap_inference_torch_compile": False,
+        "bootstrap_compile_vae": False,
         # The DFD stack serves every continuation. Keep it resident and use
         # the GB10-validated regional BF16 compile path.
         "continuation_lazy_module_load": False,
         "continuation_inference_torch_compile": True,
+        "continuation_compile_vae": False,
         # Do not hide two full generated videos in server readiness. Compiled
         # DFD pays its one-time capture on the first continuation instead.
         "startup_warmup": False,
@@ -273,6 +275,16 @@ if MODEL_CONFIG.get("generation_backend") == "cosmos25_dfd":
         _env_bool(
             "DREAMVERSE_COSMOS25_CONTINUATION_INFERENCE_TORCH_COMPILE",
             continuation_compile_default,
+        ),
+        "bootstrap_compile_vae":
+        _env_bool(
+            "DREAMVERSE_COSMOS25_BOOTSTRAP_COMPILE_VAE",
+            cast(bool, MODEL_CONFIG["bootstrap_compile_vae"]),
+        ),
+        "continuation_compile_vae":
+        _env_bool(
+            "DREAMVERSE_COSMOS25_CONTINUATION_COMPILE_VAE",
+            cast(bool, MODEL_CONFIG["continuation_compile_vae"]),
         ),
         "startup_warmup":
         _env_bool(
