@@ -62,14 +62,14 @@ ARMS = {
         False,
         True,
     ),
-    "full_sdpa_regional_vae": Arm(
-        "full_sdpa_regional_vae",
+    "bootstrap_sdpa_regional": Arm(
+        "bootstrap_sdpa_regional",
         "TORCH_SDPA",
         False,
         False,
         True,
         True,
-        True,
+        False,
         True,
     ),
     "resident_flash": Arm("resident_flash", "FLASH_ATTN", False, False, False, False),
@@ -78,7 +78,7 @@ ARMS = {
 CORE_ARMS = ("lazy_sdpa", "resident_sdpa_regional", "hybrid_sdpa_regional")
 DECODE_ARMS = ("hybrid_sdpa_regional", "hybrid_sdpa_regional_vae")
 PRODUCTION_ARMS = ("lazy_sdpa", "hybrid_sdpa_regional_vae")
-BOOTSTRAP_ARMS = ("hybrid_sdpa_regional_vae", "full_sdpa_regional_vae")
+BOOTSTRAP_ARMS = ("hybrid_sdpa_regional_vae", "bootstrap_sdpa_regional")
 
 
 def _parser() -> argparse.ArgumentParser:
