@@ -65,6 +65,23 @@ def test_production_matrix_compares_original_and_stacked_profile() -> None:
     )
 
 
+def test_bootstrap_matrix_adds_compile_only_to_the_t2w_role() -> None:
+    assert benchmark._selected_arms("bootstrap") == (
+        "hybrid_sdpa_regional_vae",
+        "full_sdpa_regional_vae",
+    )
+    baseline, compiled = (benchmark.ARMS[name] for name in benchmark.BOOTSTRAP_ARMS)
+
+    assert baseline.bootstrap_lazy_module_load is True
+    assert baseline.bootstrap_inference_torch_compile is False
+    assert baseline.bootstrap_compile_vae is False
+    assert compiled.bootstrap_lazy_module_load is False
+    assert compiled.bootstrap_inference_torch_compile is True
+    assert compiled.bootstrap_compile_vae is True
+    assert compiled.continuation_inference_torch_compile is True
+    assert compiled.continuation_compile_vae is True
+
+
 def test_model_config_keeps_the_generation_contract_fixed(tmp_path) -> None:
     args = _args(tmp_path)
 

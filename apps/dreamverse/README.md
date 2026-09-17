@@ -221,9 +221,11 @@ from 37.58 to 51.71 GB, so deployment warmup is part of this profile.
 
 The final paired production matrix measured the original lazy BF16 SDPA profile
 at 144.12 seconds and the complete hybrid + regional DiT + compiled-decoder
-profile at 106.39 seconds: 26.2% lower continuation latency (1.35x
-throughput-equivalent). Decoded output measured 48.18 dB PSNR against the
-original profile and the component visual gates passed.
+profile at 106.39 seconds: 26.2% lower continuation latency. Batch-one THWC
+frame packing then reduced post-decode processing from 2.86 to 2.36 seconds
+and median end-to-end latency to 105.55 seconds: 26.8% below the original
+profile (1.37x throughput-equivalent). Decoded output measured 48.18 dB PSNR
+against the original profile and the component visual gates passed.
 
 The profile uses a 30-minute session lease because sequential generation on
 GB10-class hardware can exceed Dreamverse's five-minute default while the GPU
