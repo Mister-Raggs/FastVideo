@@ -203,6 +203,9 @@ are `LAZY_MODULE_LOAD` and `INFERENCE_TORCH_COMPILE`.
 compile gates. They remain disabled until the fixed-shape GB10 decode benchmark
 demonstrates a warm latency win and decoded-frame parity.
 
+Use benchmark selection `--arm decode` to compare the validated hybrid profile
+with the otherwise-identical continuation VAE-compile arm.
+
 On a GB10 DFD continuation, regional compile reduced a correct-input request
 from 147.25 to 125.17 seconds (15.0%). Its decoded all-frame sample measured
 48.18 dB PSNR and 0.45 mean absolute pixel error against eager SDPA, and passed

@@ -46,6 +46,18 @@ def test_core_matrix_is_quality_safe_and_residency_focused() -> None:
     assert benchmark.ARMS["hybrid_sdpa_regional_vae"].continuation_compile_vae is True
 
 
+def test_decode_matrix_changes_only_continuation_vae_compile() -> None:
+    assert benchmark._selected_arms("decode") == (
+        "hybrid_sdpa_regional",
+        "hybrid_sdpa_regional_vae",
+    )
+    eager, compiled = (benchmark.ARMS[name] for name in benchmark.DECODE_ARMS)
+
+    assert eager.continuation_compile_vae is False
+    assert compiled.continuation_compile_vae is True
+    assert eager.__dict__ | {"name": compiled.name, "continuation_compile_vae": True} == compiled.__dict__
+
+
 def test_model_config_keeps_the_generation_contract_fixed(tmp_path) -> None:
     args = _args(tmp_path)
 

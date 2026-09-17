@@ -66,6 +66,7 @@ ARMS = {
     "resident_flash_regional": Arm("resident_flash_regional", "FLASH_ATTN", False, False, True, True),
 }
 CORE_ARMS = ("lazy_sdpa", "resident_sdpa_regional", "hybrid_sdpa_regional")
+DECODE_ARMS = ("hybrid_sdpa_regional", "hybrid_sdpa_regional_vae")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -77,7 +78,7 @@ def _parser() -> argparse.ArgumentParser:
     prompt_group = parser.add_mutually_exclusive_group()
     prompt_group.add_argument("--prompt", default=DEFAULT_PROMPT)
     prompt_group.add_argument("--prompt-file")
-    parser.add_argument("--arm", choices=("core", "all", *ARMS), default="core")
+    parser.add_argument("--arm", choices=("core", "decode", "all", *ARMS), default="core")
     parser.add_argument("--output-dir", default="outputs/cosmos25_dfd_dreamverse_matrix")
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--runs", type=int, default=2)
@@ -95,6 +96,8 @@ def _parser() -> argparse.ArgumentParser:
 def _selected_arms(selection: str) -> tuple[str, ...]:
     if selection == "core":
         return CORE_ARMS
+    if selection == "decode":
+        return DECODE_ARMS
     if selection == "all":
         return tuple(ARMS)
     return (selection, )
