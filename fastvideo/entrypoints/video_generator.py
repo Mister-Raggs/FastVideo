@@ -905,10 +905,19 @@ class VideoGenerator:
             # differs <=1 LSB CPU vs GPU.)
             src = output_batch.output
             vid_u8 = (src * 255).clamp_(0, 255).to(torch.uint8)
-            vid_u8 = rearrange(vid_u8, "b c t h w -> t b c h w").cpu()
-            frames = [
-                torchvision.utils.make_grid(x, nrow=6).permute(1, 2, 0).squeeze(-1).contiguous().numpy() for x in vid_u8
-            ]
+            if vid_u8.shape[0] == 1:
+                # Serving emits one video per request. Pack the complete
+                # clip as THWC before one compact device-to-host transfer,
+                # avoiding a per-frame CPU grid/layout conversion loop.
+                packed_frames = rearrange(vid_u8[0], "c t h w -> t h w c").contiguous().cpu().numpy()
+                frames = list(packed_frames)
+            else:
+                # Preserve the existing nrow=6 grid for batched videos.
+                vid_u8 = rearrange(vid_u8, "b c t h w -> t b c h w").cpu()
+                frames = [
+                    torchvision.utils.make_grid(x, nrow=6).permute(1, 2, 0).squeeze(-1).contiguous().numpy()
+                    for x in vid_u8
+                ]
         postprocess_time = time.perf_counter() - postprocess_start
         logger.info("PostDecodeFrameProcessStage completed in %.3f s", postprocess_time)
         if logging_info is not None:

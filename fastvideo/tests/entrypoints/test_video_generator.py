@@ -273,6 +273,37 @@ def test_generate_single_video_return_frames_still_materializes_output(tmp_path)
     assert result["video_path"] is None
 
 
+def test_generate_single_video_batch_one_skips_grid_loop(monkeypatch, tmp_path):
+    """Batch-one serving packs all THWC frames without make_grid."""
+    torch.manual_seed(0)
+    output = torch.rand((1, 3, 3, 16, 16), dtype=torch.float32)
+    output_batch = _single_video_output_batch(output)
+    fastvideo_args = _single_video_args()
+    generator = _single_video_generator(output_batch, fastvideo_args)
+    sampling_param = _small_sampling_param(save_video=False, return_frames=True)
+    sampling_param.num_frames = 3
+
+    def fail_make_grid(*args, **kwargs):
+        raise AssertionError("batch-one fast path must not call make_grid")
+
+    monkeypatch.setattr(video_generator_module.torchvision.utils,
+                        "make_grid", fail_make_grid)
+
+    result = generator._generate_single_video(
+        prompt="batch-one frame packing",
+        sampling_param=sampling_param,
+        fastvideo_args=fastvideo_args,
+        output_path=str(tmp_path / "unused.mp4"),
+    )
+
+    expected = (output[0] * 255).clamp_(0, 255).to(torch.uint8)
+    expected = expected.permute(1, 2, 3, 0).contiguous().numpy()
+    assert len(result["frames"]) == 3
+    for got, want in zip(result["frames"], expected, strict=True):
+        assert got.flags.c_contiguous
+        np.testing.assert_array_equal(got, want)
+
+
 def test_generate_single_video_frames_match_legacy_cpu_loop(tmp_path):
     """The on-device quantize path (#1362) must reproduce the legacy
     per-frame CPU loop (make_grid -> permute -> *255 -> uint8) bit-exactly
