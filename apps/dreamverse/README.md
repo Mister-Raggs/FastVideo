@@ -174,12 +174,29 @@ export ENABLE_TORCH_COMPILE=0
 dreamverse-server --host 0.0.0.0 --port 8009
 ```
 
-The backend loads and warms both model roles before reporting ready. Both use
-BF16, Torch SDPA, 704x1280 output, 24 FPS, and four steps. Bootstrap segments
-contain 77 frames. DFD segments contain 81 decoded frames, but Dreamverse drops
-the repeated conditioning frame before streaming, leaving 80 new frames. An
-initial user image selects DFD immediately without treating that first frame as
-a cross-segment overlap.
+The backend loads both model roles before reporting ready. Both use BF16, Torch
+SDPA, 704x1280 output, 24 FPS, and four steps. On unified-memory GB10 systems,
+the Cosmos profile explicitly keeps both 2B roles resident instead of applying
+FastVideo's generic per-request lazy module loading policy. It also skips the
+two generated startup warmups by default; the first real request is therefore
+a cold request. Bootstrap segments contain 77 frames. DFD segments contain 81
+decoded frames, but Dreamverse drops the repeated conditioning frame before
+streaming, leaving 80 new frames. An initial user image selects DFD immediately
+without treating that first frame as a cross-segment overlap.
+
+The runtime profile can be changed without editing the registry:
+
+```bash
+export DREAMVERSE_COSMOS25_LAZY_MODULE_LOAD=1        # reproduce the old GB10 policy
+export DREAMVERSE_COSMOS25_INFERENCE_TORCH_COMPILE=1 # regional BF16 DiT compile
+export DREAMVERSE_COSMOS25_STARTUP_WARMUP=1          # warm both generation paths
+export DREAMVERSE_COSMOS25_ATTENTION_BACKEND=flash_attn
+```
+
+Regional compile and FlashAttention are opt-in until their latency and decoded
+output pass the benchmark's numerical and visual gates. The default does not
+change the model weights, four-step schedule, attention implementation, seed,
+resolution, or frame count.
 
 The profile uses a 30-minute session lease because sequential generation on
 GB10-class hardware can exceed Dreamverse's five-minute default while the GPU
@@ -189,8 +206,27 @@ is still making progress. Deployments can override the lease with
 Cosmos does not produce audio, so the backend supplies duration-matched silent
 24 kHz audio for the existing browser streaming contract and trims 1,000 audio
 samples with each repeated DFD boundary frame. Runtime LoRA changes are not
-supported. Full segments take roughly 145 seconds on GB10, so this profile is a
-continuation-quality integration rather than a real-time configuration.
+supported.
+
+To compare the prior lazy-loading baseline with resident inference and
+precision-preserving regional compile, run the isolated DreamVerse matrix on
+the target GPU. Each arm preserves BF16, the same model packages, schedule,
+seed, dimensions, and frame count. The harness reports initialization and stage
+medians, writes a review MP4 and boundary image, and computes decoded-frame
+parity against the baseline:
+
+```bash
+PYTHONPATH="$PWD/apps/dreamverse:$PWD" python \
+  apps/dreamverse/dreamverse/benchmarks/benchmark_cosmos25_dfd.py \
+  --bootstrap-model "$DREAMVERSE_MODEL_PATH" \
+  --continuation-model "$DREAMVERSE_COSMOS25_DFD_MODEL_PATH" \
+  --image /path/to/conditioning.png \
+  --arm core
+```
+
+Use `--arm all` only when FlashAttention is installed. Promote an optional arm
+only after both its numerical receipt and generated review video are accepted;
+the benchmark intentionally makes no unmeasured latency claim.
 
 ### Check Readiness
 

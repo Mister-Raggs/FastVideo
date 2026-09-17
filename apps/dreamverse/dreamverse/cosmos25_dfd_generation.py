@@ -46,7 +46,12 @@ class Cosmos25DFDGenerationBackend:
         os.environ.pop("FASTVIDEO_INFERENCE_TORCH_COMPILE", None)
 
     @staticmethod
-    def _load_generator(model_path: str):
+    def _load_generator(
+        model_path: str,
+        *,
+        lazy_module_load: bool,
+        inference_torch_compile: bool,
+    ):
         from fastvideo import VideoGenerator
 
         return VideoGenerator.from_pretrained(
@@ -58,6 +63,15 @@ class Cosmos25DFDGenerationBackend:
             text_encoder_cpu_offload=True,
             pin_cpu_memory=True,
             enable_torch_compile=False,
+            # GB10's generic auto policy enables lazy loading because it has
+            # unified memory. That is necessary for FastH3, but both Cosmos
+            # 2B roles fit together and reloading Reason1, DiT, and VAE on
+            # every segment dominates latency.
+            lazy_module_load=lazy_module_load,
+            # Regional compile preserves the BF16 precision boundaries used
+            # by eager inference (emulate_precision_casts=True) and avoids the
+            # numerical contract of whole-module enable_torch_compile.
+            inference_torch_compile=inference_torch_compile,
         )
 
     def initialize(self, model_config: dict | None = None) -> None:
@@ -71,13 +85,26 @@ class Cosmos25DFDGenerationBackend:
         bootstrap_path = _required_config_str(self.model_config, "model_path")
         continuation_path = _required_config_str(self.model_config, "continuation_model_path")
         attention_backend = _required_config_str(self.model_config, "attention_backend")
+        lazy_module_load = bool(self.model_config.get("lazy_module_load", False))
+        inference_torch_compile = bool(self.model_config.get("inference_torch_compile", False))
         self._configure_environment(attention_backend)
 
+        print(f"[GPU {self.gpu_id}] Cosmos runtime profile: "
+              f"attention={attention_backend}, lazy_module_load={lazy_module_load}, "
+              f"regional_compile={inference_torch_compile}")
         print(f"[GPU {self.gpu_id}] Loading Cosmos T2W bootstrap: {bootstrap_path}")
         print(f"[GPU {self.gpu_id}] Before bootstrap load: {self._gpu_mem()}")
-        self.bootstrap_generator = self._load_generator(bootstrap_path)
+        self.bootstrap_generator = self._load_generator(
+            bootstrap_path,
+            lazy_module_load=lazy_module_load,
+            inference_torch_compile=inference_torch_compile,
+        )
         print(f"[GPU {self.gpu_id}] Loading Cosmos DFD continuation: {continuation_path}")
-        self.continuation_generator = self._load_generator(continuation_path)
+        self.continuation_generator = self._load_generator(
+            continuation_path,
+            lazy_module_load=lazy_module_load,
+            inference_torch_compile=inference_torch_compile,
+        )
         print(f"[GPU {self.gpu_id}] Cosmos T2W + DFD loaded: {self._gpu_mem()} (warmup pending)")
 
     def shutdown(self) -> None:
@@ -158,6 +185,21 @@ class Cosmos25DFDGenerationBackend:
         sample_count = max(1, int(round((frame_count / float(fps)) * _SILENT_AUDIO_SAMPLE_RATE)))
         return torch.zeros(sample_count, dtype=torch.float32)
 
+    @staticmethod
+    def _stage_timings_ms(result: dict[str, Any]) -> dict[str, float]:
+        logging_info = result.get("logging_info")
+        stages = getattr(logging_info, "stages", None) if logging_info is not None else None
+        if not isinstance(stages, dict):
+            return {}
+        timings: dict[str, float] = {}
+        for stage_name, metrics in stages.items():
+            if not isinstance(metrics, dict):
+                continue
+            execution_time = metrics.get("execution_time")
+            if isinstance(execution_time, int | float):
+                timings[f"stage_{stage_name}_ms"] = float(execution_time) * 1000.0
+        return timings
+
     def generate_step(
         self,
         prompt: str,
@@ -206,6 +248,10 @@ class Cosmos25DFDGenerationBackend:
             "save_conditioning_ms": save_conditioning_ms,
             "e2e_latency_ms": (time.perf_counter() - started) * 1000.0,
         }
+        peak_memory_mb = result.get("peak_memory_mb")
+        if isinstance(peak_memory_mb, int | float):
+            timings["peak_memory_mb"] = float(peak_memory_mb)
+        timings.update(self._stage_timings_ms(result))
         trim_frames = 1 if uses_continuation else 0
         mode = "DFD continuation" if conditioned else "T2W bootstrap"
         print(f"[GPU {self.gpu_id}] Cosmos {mode} segment {segment_idx}: "
@@ -223,6 +269,12 @@ class Cosmos25DFDGenerationBackend:
 
     def warmup(self, prompt: str) -> dict[str, float]:
         """Exercise both T2W bootstrap and retained-frame DFD request shapes."""
+        if not bool(self.model_config.get("startup_warmup", False)):
+            print(f"[GPU {self.gpu_id}] Cosmos startup warmup skipped by runtime profile")
+            return {
+                "warmup_skipped": 1.0,
+                "warmup_total_ms": 0.0,
+            }
         warmup_prompt = (prompt or "").strip()
         if not warmup_prompt:
             raise RuntimeError("Startup warmup prompt must be non-empty.")

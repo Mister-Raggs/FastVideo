@@ -23,6 +23,9 @@ COSMOS_CONFIG = {
     "fps": 24,
     "num_inference_steps": 4,
     "seed": 42,
+    "lazy_module_load": False,
+    "inference_torch_compile": False,
+    "startup_warmup": True,
 }
 
 
@@ -82,13 +85,13 @@ def backend(monkeypatch) -> Cosmos25DFDGenerationBackend:
 
 
 def test_initialize_loads_both_package_roles(monkeypatch):
-    loaded_paths = []
+    loaded_requests = []
     generators = [_RecordingGenerator(), _RecordingGenerator()]
     backend = Cosmos25DFDGenerationBackend(gpu_id=0)
 
-    def fake_load(model_path):
-        loaded_paths.append(model_path)
-        return generators[len(loaded_paths) - 1]
+    def fake_load(model_path, **kwargs):
+        loaded_requests.append((model_path, kwargs))
+        return generators[len(loaded_requests) - 1]
 
     monkeypatch.setattr(backend, "_load_generator", fake_load)
     monkeypatch.setattr(backend, "_gpu_mem", lambda: "alloc=0.00GiB, reserved=0.00GiB")
@@ -99,9 +102,21 @@ def test_initialize_loads_both_package_roles(monkeypatch):
 
     backend.initialize(COSMOS_CONFIG)
 
-    assert loaded_paths == [
-        "/models/cosmos25-t2w",
-        "/models/cosmos25-dfd",
+    assert loaded_requests == [
+        (
+            "/models/cosmos25-t2w",
+            {
+                "lazy_module_load": False,
+                "inference_torch_compile": False,
+            },
+        ),
+        (
+            "/models/cosmos25-dfd",
+            {
+                "lazy_module_load": False,
+                "inference_torch_compile": False,
+            },
+        ),
     ]
     assert backend.bootstrap_generator is generators[0]
     assert backend.continuation_generator is generators[1]
@@ -191,6 +206,41 @@ def test_warmup_exercises_bootstrap_and_dfd_paths(backend):
     assert "warmup_bootstrap_ms" in timings
     assert "warmup_continuation_ms" in timings
     assert "warmup_total_ms" in timings
+
+
+def test_warmup_can_skip_full_startup_generations(backend):
+    backend.model_config["startup_warmup"] = False
+
+    timings = backend.warmup("warmup prompt")
+
+    assert backend.bootstrap_generator.calls == []
+    assert backend.continuation_generator.calls == []
+    assert timings == {
+        "warmup_skipped": 1.0,
+        "warmup_total_ms": 0.0,
+    }
+
+
+def test_stage_timings_are_exposed_in_step_receipt(backend):
+    backend.bootstrap_generator.generate_video = lambda *_args, **_kwargs: {
+        "frames": [np.zeros((2, 3, 3), dtype=np.uint8) for _ in range(77)],
+        "generation_time": 0.25,
+        "peak_memory_mb": 123.0,
+        "logging_info": SimpleNamespace(stages={
+            "prompt_encoding_stage": {
+                "execution_time": 1.25,
+            },
+            "denoising_stage": {
+                "execution_time": 2.5,
+            },
+        }),
+    }
+
+    result = backend.generate_step("first prompt", 1, None, True)
+
+    assert result.timings["peak_memory_mb"] == 123.0
+    assert result.timings["stage_prompt_encoding_stage_ms"] == 1250.0
+    assert result.timings["stage_denoising_stage_ms"] == 2500.0
 
 
 def test_shutdown_releases_both_generators_and_conditioning(backend):

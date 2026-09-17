@@ -98,6 +98,16 @@ MODEL_REGISTRY = {
         "fps": 24,
         "num_inference_steps": 4,
         "seed": 42,
+        # Unlike 35B FastH3, both Cosmos 2B roles fit together on GB10.
+        # Keeping their components resident avoids per-segment checkpoint
+        # materialization by FastVideo's unified-memory auto policy.
+        "lazy_module_load": False,
+        # Regional compile is quality-preserving but stays opt-in until the
+        # GB10 matrix establishes its steady-state latency and warmup cost.
+        "inference_torch_compile": False,
+        # Eager resident inference has no shape-specific compile requirement;
+        # do not hide two full generated videos in server readiness.
+        "startup_warmup": False,
         # Six sequential GB10 segments can exceed the legacy five-minute
         # DreamVerse lease even though the GPU is making progress.
         "session_timeout_seconds": 1800,
@@ -220,6 +230,32 @@ if DREAMVERSE_COSMOS25_DFD_MODEL_PATH and MODEL_CONFIG.get("generation_backend")
     MODEL_CONFIG = {
         **MODEL_CONFIG,
         "continuation_model_path": DREAMVERSE_COSMOS25_DFD_MODEL_PATH,
+    }
+
+if MODEL_CONFIG.get("generation_backend") == "cosmos25_dfd":
+    MODEL_CONFIG = {
+        **MODEL_CONFIG,
+        "attention_backend":
+        _env_choice(
+            "DREAMVERSE_COSMOS25_ATTENTION_BACKEND",
+            cast(str, MODEL_CONFIG["attention_backend"]),
+            ("torch_sdpa", "flash_attn"),
+        ).upper(),
+        "lazy_module_load":
+        _env_bool(
+            "DREAMVERSE_COSMOS25_LAZY_MODULE_LOAD",
+            cast(bool, MODEL_CONFIG["lazy_module_load"]),
+        ),
+        "inference_torch_compile":
+        _env_bool(
+            "DREAMVERSE_COSMOS25_INFERENCE_TORCH_COMPILE",
+            cast(bool, MODEL_CONFIG["inference_torch_compile"]),
+        ),
+        "startup_warmup":
+        _env_bool(
+            "DREAMVERSE_COSMOS25_STARTUP_WARMUP",
+            cast(bool, MODEL_CONFIG["startup_warmup"]),
+        ),
     }
 
 # Generation limits. Slower backends may own a longer default lease, while an

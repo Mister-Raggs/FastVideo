@@ -229,6 +229,9 @@ def test_config_registers_cosmos25_dfd_profile(monkeypatch):
         "fps": 24,
         "num_inference_steps": 4,
         "seed": 42,
+        "lazy_module_load": False,
+        "inference_torch_compile": False,
+        "startup_warmup": False,
         "session_timeout_seconds": 1800,
     }
 
@@ -249,3 +252,19 @@ def test_config_selects_cosmos25_package_roles(monkeypatch, tmp_path):
     assert module.MODEL_CONFIG["model_path"] == str(bootstrap_path)
     assert module.MODEL_CONFIG["continuation_model_path"] == str(continuation_path)
     assert module.DREAMVERSE_SP_SIZE == 1
+
+
+def test_config_allows_cosmos25_runtime_profile_overrides(monkeypatch):
+    _set_required_prompt_keys(monkeypatch)
+    monkeypatch.setenv("DREAMVERSE_MODEL_ID", "cosmos25-dfd")
+    monkeypatch.setenv("DREAMVERSE_COSMOS25_ATTENTION_BACKEND", "flash_attn")
+    monkeypatch.setenv("DREAMVERSE_COSMOS25_LAZY_MODULE_LOAD", "true")
+    monkeypatch.setenv("DREAMVERSE_COSMOS25_INFERENCE_TORCH_COMPILE", "true")
+    monkeypatch.setenv("DREAMVERSE_COSMOS25_STARTUP_WARMUP", "true")
+
+    module = _load_config_module()
+
+    assert module.MODEL_CONFIG["attention_backend"] == "FLASH_ATTN"
+    assert module.MODEL_CONFIG["lazy_module_load"] is True
+    assert module.MODEL_CONFIG["inference_torch_compile"] is True
+    assert module.MODEL_CONFIG["startup_warmup"] is True
