@@ -175,15 +175,15 @@ dreamverse-server --host 0.0.0.0 --port 8009
 ```
 
 The backend loads both model roles before reporting ready. Both use BF16, Torch
-SDPA, 704x1280 output, 24 FPS, and four steps. On unified-memory GB10 systems,
-the one-use T2W role loads lazily and releases its components after bootstrap;
-the repeatedly used DFD role stays resident and uses regional DiT plus decoder
-compile. Before reporting ready, the backend warms only DFD with a synthetic
-conditioning frame; it does not spend another full generation warming eager
-T2W. Bootstrap segments contain 77 frames. DFD segments contain 81 decoded
-frames, but Dreamverse drops the repeated conditioning frame before streaming,
-leaving 80 new frames. An initial user image selects DFD immediately without
-treating that first frame as a cross-segment overlap.
+SDPA, 704x1280 output, 24 FPS, and four steps. The one-use T2W role uses
+regional DiT compile with an eager decoder; the repeatedly used DFD role uses
+regional DiT plus decoder compile. Before reporting ready, the backend warms
+only DFD with a synthetic conditioning frame. The first T2W request captures
+its regional graphs, avoiding simultaneous high-water allocator retention in
+both workers. Bootstrap segments contain 77 frames. DFD segments contain 81
+decoded frames, but Dreamverse drops the repeated conditioning frame before
+streaming, leaving 80 new frames. An initial user image selects DFD immediately
+without treating that first frame as a cross-segment overlap.
 
 The runtime profile can be changed without editing the registry:
 
@@ -191,7 +191,7 @@ The runtime profile can be changed without editing the registry:
 export DREAMVERSE_COSMOS25_LAZY_MODULE_LOAD=1        # reproduce the old GB10 policy
 export DREAMVERSE_COSMOS25_INFERENCE_TORCH_COMPILE=1 # regional BF16 DiT compile
 export DREAMVERSE_COSMOS25_STARTUP_WARMUP=1          # warm compiled DFD before ready
-export DREAMVERSE_COSMOS25_WARMUP_BOOTSTRAP=1        # optionally warm eager T2W too
+export DREAMVERSE_COSMOS25_WARMUP_BOOTSTRAP=1        # optionally warm compiled T2W too
 export DREAMVERSE_COSMOS25_ATTENTION_BACKEND=flash_attn
 ```
 
@@ -207,6 +207,9 @@ decode compile remains off.
 
 Use benchmark selection `--arm decode` to compare the validated hybrid profile
 with the otherwise-identical continuation VAE-compile arm.
+
+Use `--role bootstrap --arm bootstrap` to compare eager T2W with the production
+regional-DiT profile. Bootstrap decoder compile is intentionally excluded.
 
 On a GB10 DFD continuation, regional compile reduced a correct-input request
 from 147.25 to 125.17 seconds (15.0%). Its decoded all-frame sample measured
@@ -226,6 +229,15 @@ frame packing then reduced post-decode processing from 2.86 to 2.36 seconds
 and median end-to-end latency to 105.55 seconds: 26.8% below the original
 profile (1.37x throughput-equivalent). Decoded output measured 48.18 dB PSNR
 against the original profile and the component visual gates passed.
+
+For the T2W bootstrap, regional DiT compile reduced median end-to-end latency
+from 136.37 to 112.84 seconds (17.3%) and denoising from 92.46 to 68.86
+seconds (25.5%) with unchanged 37.55 GB peak memory. The decoded comparison
+measured 36.38 dB PSNR and 1.72 mean absolute pixel error and passed visual
+review. Compiling the bootstrap decoder was rejected: its first 77-frame
+decode remained in compilation for more than five minutes and caused severe
+host memory pressure. The production profile therefore keeps that decoder
+eager.
 
 The profile uses a 30-minute session lease because sequential generation on
 GB10-class hardware can exceed Dreamverse's five-minute default while the GPU

@@ -98,18 +98,20 @@ MODEL_REGISTRY = {
         "fps": 24,
         "num_inference_steps": 4,
         "seed": 42,
-        # T2W runs once per session; defer and release it after bootstrap so
-        # its Reason1/DiT/VAE stack does not compete with repeated DFD work.
-        "bootstrap_lazy_module_load": True,
-        "bootstrap_inference_torch_compile": False,
+        # Regional compile cuts the one-use T2W DiT without changing its peak
+        # memory. Keep its decoder eager: compiling the 77-frame decoder has
+        # an unacceptable compile-time memory/latency peak on GB10.
+        "bootstrap_lazy_module_load": False,
+        "bootstrap_inference_torch_compile": True,
         "bootstrap_compile_vae": False,
         # The DFD stack serves every continuation. Keep it resident and use
         # the GB10-validated regional BF16 compile path.
         "continuation_lazy_module_load": False,
         "continuation_inference_torch_compile": True,
         "continuation_compile_vae": True,
-        # Prewarm only the repeated compiled DFD path. T2W remains eager and
-        # pays no compile capture, so generating a bootstrap warmup is waste.
+        # Prewarm only the repeated DFD path. The first T2W compile request is
+        # still faster than eager, while warming both workers retains their
+        # allocator high-water marks and reduces unified-memory headroom.
         "startup_warmup": True,
         "warmup_bootstrap": False,
         # Six sequential GB10 segments can exceed the legacy five-minute

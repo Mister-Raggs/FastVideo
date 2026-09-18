@@ -77,7 +77,7 @@ ARMS = {
 }
 CORE_ARMS = ("lazy_sdpa", "resident_sdpa_regional", "hybrid_sdpa_regional")
 DECODE_ARMS = ("hybrid_sdpa_regional", "hybrid_sdpa_regional_vae")
-PRODUCTION_ARMS = ("lazy_sdpa", "hybrid_sdpa_regional_vae")
+PRODUCTION_ARMS = ("lazy_sdpa", "bootstrap_sdpa_regional")
 BOOTSTRAP_ARMS = ("hybrid_sdpa_regional_vae", "bootstrap_sdpa_regional")
 
 

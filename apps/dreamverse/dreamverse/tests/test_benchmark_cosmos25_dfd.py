@@ -61,7 +61,7 @@ def test_decode_matrix_changes_only_continuation_vae_compile() -> None:
 def test_production_matrix_compares_original_and_stacked_profile() -> None:
     assert benchmark._selected_arms("production") == (
         "lazy_sdpa",
-        "hybrid_sdpa_regional_vae",
+        "bootstrap_sdpa_regional",
     )
 
 
