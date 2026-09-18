@@ -52,6 +52,7 @@ class Cosmos25DFDGenerationBackend:
         lazy_module_load: bool,
         inference_torch_compile: bool,
         compile_vae: bool,
+        vae_compile_profile: str,
     ):
         from fastvideo import VideoGenerator
 
@@ -74,6 +75,7 @@ class Cosmos25DFDGenerationBackend:
             # numerical contract of whole-module enable_torch_compile.
             inference_torch_compile=inference_torch_compile,
             enable_torch_compile_vae=compile_vae,
+            vae_compile_profile=vae_compile_profile,
             torch_compile_kwargs_vae={
                 "options": {
                     "emulate_precision_casts": True,
@@ -103,13 +105,16 @@ class Cosmos25DFDGenerationBackend:
             self.model_config.get("continuation_inference_torch_compile", legacy_regional_compile))
         bootstrap_compile_vae = bool(self.model_config.get("bootstrap_compile_vae", False))
         continuation_compile_vae = bool(self.model_config.get("continuation_compile_vae", False))
+        bootstrap_vae_compile_profile = str(self.model_config.get("bootstrap_vae_compile_profile", "default"))
+        continuation_vae_compile_profile = str(self.model_config.get("continuation_vae_compile_profile", "default"))
         self._configure_environment(attention_backend)
 
         print(f"[GPU {self.gpu_id}] Cosmos runtime profile: attention={attention_backend}, "
               f"bootstrap(lazy={bootstrap_lazy_module_load}, regional_compile={bootstrap_regional_compile}), "
               f"continuation(lazy={continuation_lazy_module_load}, "
               f"regional_compile={continuation_regional_compile}), "
-              f"vae_compile=(bootstrap={bootstrap_compile_vae}, continuation={continuation_compile_vae})")
+              f"vae_compile=(bootstrap={bootstrap_compile_vae}:{bootstrap_vae_compile_profile}, "
+              f"continuation={continuation_compile_vae}:{continuation_vae_compile_profile})")
         print(f"[GPU {self.gpu_id}] Loading Cosmos T2W bootstrap: {bootstrap_path}")
         print(f"[GPU {self.gpu_id}] Before bootstrap load: {self._gpu_mem()}")
         self.bootstrap_generator = self._load_generator(
@@ -117,6 +122,7 @@ class Cosmos25DFDGenerationBackend:
             lazy_module_load=bootstrap_lazy_module_load,
             inference_torch_compile=bootstrap_regional_compile,
             compile_vae=bootstrap_compile_vae,
+            vae_compile_profile=bootstrap_vae_compile_profile,
         )
         print(f"[GPU {self.gpu_id}] Loading Cosmos DFD continuation: {continuation_path}")
         self.continuation_generator = self._load_generator(
@@ -124,6 +130,7 @@ class Cosmos25DFDGenerationBackend:
             lazy_module_load=continuation_lazy_module_load,
             inference_torch_compile=continuation_regional_compile,
             compile_vae=continuation_compile_vae,
+            vae_compile_profile=continuation_vae_compile_profile,
         )
         print(f"[GPU {self.gpu_id}] Cosmos T2W + DFD loaded: {self._gpu_mem()} (warmup pending)")
 

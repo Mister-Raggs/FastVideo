@@ -104,11 +104,13 @@ MODEL_REGISTRY = {
         "bootstrap_lazy_module_load": False,
         "bootstrap_inference_torch_compile": True,
         "bootstrap_compile_vae": False,
+        "bootstrap_vae_compile_profile": "default",
         # The DFD stack serves every continuation. Keep it resident and use
         # the GB10-validated regional BF16 compile path.
         "continuation_lazy_module_load": False,
         "continuation_inference_torch_compile": True,
         "continuation_compile_vae": True,
+        "continuation_vae_compile_profile": "default",
         # Prewarm only the repeated DFD path. The first T2W compile request is
         # still faster than eager, while warming both workers retains their
         # allocator high-water marks and reduces unified-memory headroom.
@@ -257,7 +259,7 @@ if MODEL_CONFIG.get("generation_backend") == "cosmos25_dfd":
         _env_choice(
             "DREAMVERSE_COSMOS25_ATTENTION_BACKEND",
             cast(str, MODEL_CONFIG["attention_backend"]),
-            ("torch_sdpa", "flash_attn"),
+            ("torch_sdpa", "flash_attn", "attn_qat_infer"),
         ).upper(),
         "bootstrap_lazy_module_load":
         _env_bool(
@@ -284,10 +286,22 @@ if MODEL_CONFIG.get("generation_backend") == "cosmos25_dfd":
             "DREAMVERSE_COSMOS25_BOOTSTRAP_COMPILE_VAE",
             cast(bool, MODEL_CONFIG["bootstrap_compile_vae"]),
         ),
+        "bootstrap_vae_compile_profile":
+        _env_choice(
+            "DREAMVERSE_COSMOS25_BOOTSTRAP_VAE_COMPILE_PROFILE",
+            cast(str, MODEL_CONFIG["bootstrap_vae_compile_profile"]),
+            ("default", "regional"),
+        ),
         "continuation_compile_vae":
         _env_bool(
             "DREAMVERSE_COSMOS25_CONTINUATION_COMPILE_VAE",
             cast(bool, MODEL_CONFIG["continuation_compile_vae"]),
+        ),
+        "continuation_vae_compile_profile":
+        _env_choice(
+            "DREAMVERSE_COSMOS25_CONTINUATION_VAE_COMPILE_PROFILE",
+            cast(str, MODEL_CONFIG["continuation_vae_compile_profile"]),
+            ("default", "regional"),
         ),
         "startup_warmup":
         _env_bool(

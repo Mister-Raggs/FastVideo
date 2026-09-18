@@ -203,7 +203,10 @@ are `LAZY_MODULE_LOAD` and `INFERENCE_TORCH_COMPILE`.
 `DREAMVERSE_COSMOS25_BOOTSTRAP_COMPILE_VAE` and
 `DREAMVERSE_COSMOS25_CONTINUATION_COMPILE_VAE` control decoder-only compile.
 Continuation decode compile is enabled in the optimized profile; bootstrap
-decode compile remains off.
+decode compile remains off. The corresponding
+`DREAMVERSE_COSMOS25_*_VAE_COMPILE_PROFILE` variables accept `default` or
+`regional`; `regional` compiles bounded Cosmos decoder blocks while leaving
+the top-level temporal/cache loop eager.
 
 Use benchmark selection `--arm decode` to compare the validated hybrid profile
 with the otherwise-identical continuation VAE-compile arm.
@@ -234,10 +237,12 @@ For the T2W bootstrap, regional DiT compile reduced median end-to-end latency
 from 136.37 to 112.84 seconds (17.3%) and denoising from 92.46 to 68.86
 seconds (25.5%) with unchanged 37.55 GB peak memory. The decoded comparison
 measured 36.38 dB PSNR and 1.72 mean absolute pixel error and passed visual
-review. Compiling the bootstrap decoder was rejected: its first 77-frame
+review. Compiling the complete bootstrap decoder was rejected: its first 77-frame
 decode remained in compilation for more than five minutes and caused severe
 host memory pressure. The production profile therefore keeps that decoder
-eager.
+eager. A bounded regional-decoder experiment is available through benchmark
+selection `--arm bootstrap-vae`; it is not a serving default until its latency,
+memory, numerical, and visual gates pass on GB10.
 
 The profile uses a 30-minute session lease because sequential generation on
 GB10-class hardware can exceed Dreamverse's five-minute default while the GPU
@@ -265,9 +270,62 @@ PYTHONPATH="$PWD/apps/dreamverse:$PWD" python \
   --arm core
 ```
 
-Use `--arm all` only when FlashAttention is installed. Promote an optional arm
-only after both its numerical receipt and generated review video are accepted;
-the benchmark intentionally makes no unmeasured latency claim.
+Use `--arm all` only when both FlashAttention and the architecture-specific
+`ATTN_QAT_INFER` kernel are installed. Promote an optional arm only after both
+its numerical receipt and generated review video are accepted; the benchmark
+intentionally makes no unmeasured latency claim.
+
+To test bounded bootstrap VAE compilation first, run one warmup and one
+measured request per isolated arm. Each arm has a watchdog that terminates its
+process group if compilation exceeds the requested deadline:
+
+```bash
+PYTHONPATH="$PWD/apps/dreamverse:$PWD" python \
+  apps/dreamverse/dreamverse/benchmarks/benchmark_cosmos25_dfd.py \
+  --bootstrap-model "$DREAMVERSE_MODEL_PATH" \
+  --continuation-model "$DREAMVERSE_COSMOS25_DFD_MODEL_PATH" \
+  --role bootstrap \
+  --arm bootstrap-vae \
+  --warmups 1 \
+  --runs 1 \
+  --arm-timeout-seconds 1200 \
+  --output-dir outputs/cosmos25_bootstrap_vae_regions
+```
+
+The FP4 matrix uses the GB10 `ATTN_QAT_INFER` kernel for Cosmos video
+self-attention only. Cross-attention is explicitly pinned to BF16 Torch SDPA,
+because quantizing it previously introduced visible sparkle/flicker. Compare
+the current regional-SDPA profile, eager FP4, and regional-compile FP4 on both
+model roles:
+
+```bash
+PYTHONPATH="$PWD/apps/dreamverse:$PWD" python \
+  apps/dreamverse/dreamverse/benchmarks/benchmark_cosmos25_dfd.py \
+  --bootstrap-model "$DREAMVERSE_MODEL_PATH" \
+  --continuation-model "$DREAMVERSE_COSMOS25_DFD_MODEL_PATH" \
+  --role bootstrap \
+  --arm fp4 \
+  --warmups 1 \
+  --runs 1 \
+  --arm-timeout-seconds 1200 \
+  --output-dir outputs/cosmos25_fp4_bootstrap
+
+PYTHONPATH="$PWD/apps/dreamverse:$PWD" python \
+  apps/dreamverse/dreamverse/benchmarks/benchmark_cosmos25_dfd.py \
+  --bootstrap-model "$DREAMVERSE_MODEL_PATH" \
+  --continuation-model "$DREAMVERSE_COSMOS25_DFD_MODEL_PATH" \
+  --image /path/to/conditioning.png \
+  --role continuation \
+  --arm fp4 \
+  --warmups 1 \
+  --runs 1 \
+  --arm-timeout-seconds 1200 \
+  --output-dir outputs/cosmos25_fp4_continuation
+```
+
+An FP4 arm fails before model loading unless the architecture-specific kernel
+is importable. Review every generated MP4 and continuation boundary image;
+decoded PSNR alone is not a sufficient gate for quantized diffusion paths.
 
 ### Check Readiness
 

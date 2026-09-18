@@ -232,9 +232,11 @@ def test_config_registers_cosmos25_dfd_profile(monkeypatch):
         "bootstrap_lazy_module_load": False,
         "bootstrap_inference_torch_compile": True,
         "bootstrap_compile_vae": False,
+        "bootstrap_vae_compile_profile": "default",
         "continuation_lazy_module_load": False,
         "continuation_inference_torch_compile": True,
         "continuation_compile_vae": True,
+        "continuation_vae_compile_profile": "default",
         "startup_warmup": True,
         "warmup_bootstrap": False,
         "session_timeout_seconds": 1800,
@@ -262,25 +264,29 @@ def test_config_selects_cosmos25_package_roles(monkeypatch, tmp_path):
 def test_config_allows_cosmos25_runtime_profile_overrides(monkeypatch):
     _set_required_prompt_keys(monkeypatch)
     monkeypatch.setenv("DREAMVERSE_MODEL_ID", "cosmos25-dfd")
-    monkeypatch.setenv("DREAMVERSE_COSMOS25_ATTENTION_BACKEND", "flash_attn")
+    monkeypatch.setenv("DREAMVERSE_COSMOS25_ATTENTION_BACKEND", "attn_qat_infer")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_BOOTSTRAP_LAZY_MODULE_LOAD", "false")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_CONTINUATION_LAZY_MODULE_LOAD", "true")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_BOOTSTRAP_INFERENCE_TORCH_COMPILE", "true")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_CONTINUATION_INFERENCE_TORCH_COMPILE", "false")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_BOOTSTRAP_COMPILE_VAE", "true")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_CONTINUATION_COMPILE_VAE", "true")
+    monkeypatch.setenv("DREAMVERSE_COSMOS25_BOOTSTRAP_VAE_COMPILE_PROFILE", "regional")
+    monkeypatch.setenv("DREAMVERSE_COSMOS25_CONTINUATION_VAE_COMPILE_PROFILE", "default")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_STARTUP_WARMUP", "true")
     monkeypatch.setenv("DREAMVERSE_COSMOS25_WARMUP_BOOTSTRAP", "true")
 
     module = _load_config_module()
 
-    assert module.MODEL_CONFIG["attention_backend"] == "FLASH_ATTN"
+    assert module.MODEL_CONFIG["attention_backend"] == "ATTN_QAT_INFER"
     assert module.MODEL_CONFIG["bootstrap_lazy_module_load"] is False
     assert module.MODEL_CONFIG["continuation_lazy_module_load"] is True
     assert module.MODEL_CONFIG["bootstrap_inference_torch_compile"] is True
     assert module.MODEL_CONFIG["continuation_inference_torch_compile"] is False
     assert module.MODEL_CONFIG["bootstrap_compile_vae"] is True
     assert module.MODEL_CONFIG["continuation_compile_vae"] is True
+    assert module.MODEL_CONFIG["bootstrap_vae_compile_profile"] == "regional"
+    assert module.MODEL_CONFIG["continuation_vae_compile_profile"] == "default"
     assert module.MODEL_CONFIG["startup_warmup"] is True
     assert module.MODEL_CONFIG["warmup_bootstrap"] is True
 

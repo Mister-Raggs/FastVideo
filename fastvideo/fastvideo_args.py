@@ -206,6 +206,10 @@ class FastVideoArgs:
     enable_torch_compile_text_encoder: bool = False
     enable_torch_compile_vae: bool = False
     enable_torch_compile_audio_vae: bool = False
+    # Select a model-declared VAE compile-condition set. ``default`` preserves
+    # the existing ``_compile_conditions`` behavior; model-specific profiles
+    # can expose smaller regions when whole-codec compilation is too costly.
+    vae_compile_profile: str = "default"
     # ``torch_compile_kwargs`` is the master kwargs dict (applied to every
     # compiled submodule unless a per-component dict below is non-empty,
     # in which case the per-component dict overrides entirely — matching

@@ -26,6 +26,7 @@ def _args(tmp_path) -> Namespace:
         continuation_frames=81,
         fps=24,
         quality_scale=4,
+        arm_timeout_seconds=1800,
         dry_run=True,
     )
 
@@ -82,6 +83,44 @@ def test_bootstrap_matrix_adds_dit_compile_only_to_the_t2w_role() -> None:
     assert compiled.continuation_compile_vae is True
 
 
+def test_bootstrap_vae_matrix_changes_only_the_bootstrap_decoder_compile_profile() -> None:
+    assert benchmark._selected_arms("bootstrap-vae") == (
+        "bootstrap_sdpa_regional",
+        "bootstrap_sdpa_regional_vae_regions",
+    )
+    baseline, regional_vae = (benchmark.ARMS[name] for name in benchmark.BOOTSTRAP_VAE_ARMS)
+
+    assert baseline.bootstrap_compile_vae is False
+    assert baseline.bootstrap_vae_compile_profile == "default"
+    assert regional_vae.bootstrap_compile_vae is True
+    assert regional_vae.bootstrap_vae_compile_profile == "regional"
+    expected = baseline.__dict__ | {
+        "name": regional_vae.name,
+        "bootstrap_compile_vae": True,
+        "bootstrap_vae_compile_profile": "regional",
+    }
+    assert expected == regional_vae.__dict__
+
+
+def test_fp4_matrix_compares_eager_and_regional_self_attention() -> None:
+    assert benchmark._selected_arms("fp4") == (
+        "bootstrap_sdpa_regional",
+        "fp4_eager",
+        "fp4_regional",
+    )
+    baseline, fp4_eager, fp4_regional = (benchmark.ARMS[name] for name in benchmark.FP4_ARMS)
+
+    assert baseline.attention_backend == "TORCH_SDPA"
+    assert fp4_eager.attention_backend == "ATTN_QAT_INFER"
+    assert fp4_eager.bootstrap_inference_torch_compile is False
+    assert fp4_eager.continuation_inference_torch_compile is False
+    assert fp4_regional.attention_backend == "ATTN_QAT_INFER"
+    assert fp4_regional.bootstrap_inference_torch_compile is True
+    assert fp4_regional.continuation_inference_torch_compile is True
+    assert fp4_eager.continuation_compile_vae is True
+    assert fp4_regional.continuation_compile_vae is True
+
+
 def test_model_config_keeps_the_generation_contract_fixed(tmp_path) -> None:
     args = _args(tmp_path)
 
@@ -99,6 +138,8 @@ def test_model_config_keeps_the_generation_contract_fixed(tmp_path) -> None:
     assert config["continuation_inference_torch_compile"] is True
     assert config["bootstrap_compile_vae"] is False
     assert config["continuation_compile_vae"] is False
+    assert config["bootstrap_vae_compile_profile"] == "default"
+    assert config["continuation_vae_compile_profile"] == "default"
     assert config["startup_warmup"] is False
 
 

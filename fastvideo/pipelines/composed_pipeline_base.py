@@ -187,9 +187,18 @@ class ComposedPipelineBase(ABC):
     def _compile_with_conditions(
         module: torch.nn.Module,
         compile_kwargs: dict[str, Any],
+        condition_profile: str = "default",
     ) -> int:
         """Compile submodules that match module._compile_conditions."""
-        compile_conditions = getattr(module, "_compile_conditions", None)
+        if condition_profile == "default":
+            compile_conditions = getattr(module, "_compile_conditions", None)
+        else:
+            condition_profiles = getattr(module, "_compile_condition_profiles", None)
+            if not isinstance(condition_profiles, dict) or condition_profile not in condition_profiles:
+                available = sorted(condition_profiles) if isinstance(condition_profiles, dict) else []
+                raise ValueError(f"{type(module).__name__} does not declare VAE compile profile "
+                                 f"{condition_profile!r}; available profiles: {available}")
+            compile_conditions = condition_profiles[condition_profile]
         if not compile_conditions:
             return 0
 
@@ -208,6 +217,7 @@ class ComposedPipelineBase(ABC):
         module: torch.nn.Module,
         fsdp_module_cls: type | None,
         compile_kwargs: dict[str, Any],
+        condition_profile: str = "default",
     ) -> Any:
         """Apply pipeline-level compile setup to one loaded component."""
         if fsdp_module_cls is not None and isinstance(module, fsdp_module_cls):
@@ -222,7 +232,11 @@ class ComposedPipelineBase(ABC):
             logger.info("Running prepare_for_compile for %s", module_name)
             prepare_for_compile()
 
-        compiled_count = ComposedPipelineBase._compile_with_conditions(module, compile_kwargs)
+        compiled_count = ComposedPipelineBase._compile_with_conditions(
+            module,
+            compile_kwargs,
+            condition_profile=condition_profile,
+        )
         if compiled_count > 0:
             logger.info(
                 "Enabled torch.compile for %d submodules in %s via _compile_conditions with kwargs=%s",
@@ -241,6 +255,7 @@ class ComposedPipelineBase(ABC):
         module_name: str,
         fsdp_module_cls: type | None,
         compile_kwargs: dict[str, Any],
+        condition_profile: str = "default",
     ) -> None:
         if module_name not in self.modules:
             return
@@ -257,6 +272,7 @@ class ComposedPipelineBase(ABC):
                     module_name,
                     fsdp_module_cls=fsdp_module_cls,
                     compile_kwargs=dict(compile_kwargs),
+                    condition_profile=condition_profile,
                 ))
             logger.info("Configured torch.compile for every materialization of deferred %s", module_name)
             return
@@ -266,6 +282,7 @@ class ComposedPipelineBase(ABC):
             entry,
             fsdp_module_cls,
             compile_kwargs,
+            condition_profile,
         )
 
     def _apply_inference_compile(self, module_names: tuple[str, ...] | None = None) -> None:
@@ -344,6 +361,7 @@ class ComposedPipelineBase(ABC):
                 module_name="vae",
                 fsdp_module_cls=fsdp_module_cls,
                 compile_kwargs=vae_compile_kwargs,
+                condition_profile=self.fastvideo_args.vae_compile_profile,
             )
             if "vae" in self.modules:
                 logger.info("Torch Compile enabled for VAE")

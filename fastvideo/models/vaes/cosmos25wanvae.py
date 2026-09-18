@@ -518,6 +518,18 @@ def _is_cosmos25_vae_decoder(name: str, submodule: nn.Module) -> bool:
     return name == "decoder" and isinstance(submodule, Cosmos25Decoder3d)
 
 
+def _is_cosmos25_vae_decoder_region(name: str, submodule: nn.Module) -> bool:
+    """Match bounded decoder regions without capturing its temporal loop.
+
+    The top-level decoder mutates feature-cache lists while iterating over one
+    latent frame at a time. Compiling it as a single region has an excessive
+    compile-time memory peak for the 77-frame Cosmos bootstrap on GB10. This
+    profile keeps that orchestration, resampling, and final projection eager,
+    while compiling the repeated residual and pure attention blocks in place.
+    """
+    return name.startswith("decoder.") and isinstance(submodule, (Cosmos25ResidualBlock, Cosmos25AttentionBlock))
+
+
 class Cosmos25WanVAE(nn.Module):
     """
     A FastVideo-native copy of the *official-like* Wan2.1 VAE core.
@@ -532,6 +544,9 @@ class Cosmos25WanVAE(nn.Module):
     handles_latent_norm: bool = True
     handles_latent_denorm: bool = True
     _compile_conditions = [_is_cosmos25_vae_decoder]
+    _compile_condition_profiles = {
+        "regional": [_is_cosmos25_vae_decoder_region],
+    }
 
     def __init__(
         self,

@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 
 from fastvideo.configs.models.dits.base import DiTArchConfig, DiTConfig
+from fastvideo.platforms import AttentionBackendEnum
 
 
 def is_transformer_blocks(n: str, m) -> bool:
@@ -13,6 +14,11 @@ class Cosmos25ArchConfig(DiTArchConfig):
     """Configuration for Cosmos 2.5 architecture (MiniTrainDIT)."""
 
     _fsdp_shard_conditions: list = field(default_factory=lambda: [is_transformer_blocks])
+    _supported_attention_backends: tuple[AttentionBackendEnum, ...] = (
+        AttentionBackendEnum.ATTN_QAT_INFER,
+        AttentionBackendEnum.FLASH_ATTN,
+        AttentionBackendEnum.TORCH_SDPA,
+    )
 
     param_names_mapping: dict = field(
         default_factory=lambda: {

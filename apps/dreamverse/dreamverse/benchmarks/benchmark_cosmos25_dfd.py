@@ -16,6 +16,13 @@ The ``core`` matrix answers the first production question cheaply:
 
 The optional FlashAttention arms retain BF16 and are subject to decoded-frame
 parity plus visual review before promotion.
+
+Two experimental matrices leave production defaults unchanged:
+
+* ``bootstrap-vae`` compares the production bootstrap against bounded
+  residual/attention-block VAE compilation.
+* ``fp4`` compares production regional SDPA with eager and regional
+  self-attention-only FP4; Cosmos cross-attention remains BF16 Torch SDPA.
 """
 from __future__ import annotations
 
@@ -23,6 +30,7 @@ import argparse
 import json
 import math
 import os
+import signal
 import statistics
 import subprocess
 import sys
@@ -45,14 +53,21 @@ class Arm:
     continuation_inference_torch_compile: bool
     bootstrap_compile_vae: bool = False
     continuation_compile_vae: bool = False
+    bootstrap_vae_compile_profile: str = "default"
+    continuation_vae_compile_profile: str = "default"
 
 
 ARMS = {
-    "lazy_sdpa": Arm("lazy_sdpa", "TORCH_SDPA", True, True, False, False),
-    "resident_sdpa": Arm("resident_sdpa", "TORCH_SDPA", False, False, False, False),
-    "resident_sdpa_regional": Arm("resident_sdpa_regional", "TORCH_SDPA", False, False, True, True),
-    "hybrid_sdpa_regional": Arm("hybrid_sdpa_regional", "TORCH_SDPA", True, False, False, True),
-    "hybrid_sdpa_regional_vae": Arm(
+    "lazy_sdpa":
+    Arm("lazy_sdpa", "TORCH_SDPA", True, True, False, False),
+    "resident_sdpa":
+    Arm("resident_sdpa", "TORCH_SDPA", False, False, False, False),
+    "resident_sdpa_regional":
+    Arm("resident_sdpa_regional", "TORCH_SDPA", False, False, True, True),
+    "hybrid_sdpa_regional":
+    Arm("hybrid_sdpa_regional", "TORCH_SDPA", True, False, False, True),
+    "hybrid_sdpa_regional_vae":
+    Arm(
         "hybrid_sdpa_regional_vae",
         "TORCH_SDPA",
         True,
@@ -62,7 +77,8 @@ ARMS = {
         False,
         True,
     ),
-    "bootstrap_sdpa_regional": Arm(
+    "bootstrap_sdpa_regional":
+    Arm(
         "bootstrap_sdpa_regional",
         "TORCH_SDPA",
         False,
@@ -72,13 +88,52 @@ ARMS = {
         False,
         True,
     ),
-    "resident_flash": Arm("resident_flash", "FLASH_ATTN", False, False, False, False),
-    "resident_flash_regional": Arm("resident_flash_regional", "FLASH_ATTN", False, False, True, True),
+    "bootstrap_sdpa_regional_vae_regions":
+    Arm(
+        "bootstrap_sdpa_regional_vae_regions",
+        "TORCH_SDPA",
+        False,
+        False,
+        True,
+        True,
+        True,
+        True,
+        "regional",
+        "default",
+    ),
+    "fp4_eager":
+    Arm(
+        "fp4_eager",
+        "ATTN_QAT_INFER",
+        False,
+        False,
+        False,
+        False,
+        False,
+        True,
+    ),
+    "fp4_regional":
+    Arm(
+        "fp4_regional",
+        "ATTN_QAT_INFER",
+        False,
+        False,
+        True,
+        True,
+        False,
+        True,
+    ),
+    "resident_flash":
+    Arm("resident_flash", "FLASH_ATTN", False, False, False, False),
+    "resident_flash_regional":
+    Arm("resident_flash_regional", "FLASH_ATTN", False, False, True, True),
 }
 CORE_ARMS = ("lazy_sdpa", "resident_sdpa_regional", "hybrid_sdpa_regional")
 DECODE_ARMS = ("hybrid_sdpa_regional", "hybrid_sdpa_regional_vae")
 PRODUCTION_ARMS = ("lazy_sdpa", "bootstrap_sdpa_regional")
 BOOTSTRAP_ARMS = ("hybrid_sdpa_regional_vae", "bootstrap_sdpa_regional")
+BOOTSTRAP_VAE_ARMS = ("bootstrap_sdpa_regional", "bootstrap_sdpa_regional_vae_regions")
+FP4_ARMS = ("bootstrap_sdpa_regional", "fp4_eager", "fp4_regional")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -90,7 +145,11 @@ def _parser() -> argparse.ArgumentParser:
     prompt_group = parser.add_mutually_exclusive_group()
     prompt_group.add_argument("--prompt", default=DEFAULT_PROMPT)
     prompt_group.add_argument("--prompt-file")
-    parser.add_argument("--arm", choices=("core", "decode", "production", "bootstrap", "all", *ARMS), default="core")
+    parser.add_argument(
+        "--arm",
+        choices=("core", "decode", "production", "bootstrap", "bootstrap-vae", "fp4", "all", *ARMS),
+        default="core",
+    )
     parser.add_argument("--output-dir", default="outputs/cosmos25_dfd_dreamverse_matrix")
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--runs", type=int, default=2)
@@ -101,6 +160,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--continuation-frames", type=int, default=81)
     parser.add_argument("--fps", type=int, default=24)
     parser.add_argument("--quality-scale", type=int, default=4)
+    parser.add_argument("--arm-timeout-seconds", type=int, default=1800)
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -114,6 +174,10 @@ def _selected_arms(selection: str) -> tuple[str, ...]:
         return PRODUCTION_ARMS
     if selection == "bootstrap":
         return BOOTSTRAP_ARMS
+    if selection == "bootstrap-vae":
+        return BOOTSTRAP_VAE_ARMS
+    if selection == "fp4":
+        return FP4_ARMS
     if selection == "all":
         return tuple(ARMS)
     return (selection, )
@@ -126,8 +190,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--runs must be positive")
     if args.quality_scale < 1:
         raise SystemExit("--quality-scale must be positive")
-    if args.arm == "bootstrap" and args.role != "bootstrap":
-        raise SystemExit("--arm bootstrap requires --role bootstrap")
+    if args.arm_timeout_seconds < 1:
+        raise SystemExit("--arm-timeout-seconds must be positive")
+    if args.arm in ("bootstrap", "bootstrap-vae") and args.role != "bootstrap":
+        raise SystemExit(f"--arm {args.arm} requires --role bootstrap")
     for name in ("height", "width", "bootstrap_frames", "continuation_frames", "fps"):
         if getattr(args, name) < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
@@ -182,6 +248,8 @@ def _arm_command(args: argparse.Namespace, arm_name: str) -> list[str]:
         str(args.fps),
         "--quality-scale",
         str(args.quality_scale),
+        "--arm-timeout-seconds",
+        str(args.arm_timeout_seconds),
     ]
     if args.image:
         command.extend(("--image", args.image))
@@ -213,6 +281,8 @@ def _model_config(args: argparse.Namespace, arm: Arm) -> dict[str, Any]:
         "continuation_inference_torch_compile": arm.continuation_inference_torch_compile,
         "bootstrap_compile_vae": arm.bootstrap_compile_vae,
         "continuation_compile_vae": arm.continuation_compile_vae,
+        "bootstrap_vae_compile_profile": arm.bootstrap_vae_compile_profile,
+        "continuation_vae_compile_profile": arm.continuation_vae_compile_profile,
         # The harness owns warmup so its cost is measured separately.
         "startup_warmup": False,
     }
@@ -294,6 +364,17 @@ def _run_arm(args: argparse.Namespace, arm: Arm) -> dict[str, Any]:
     os.environ["FASTVIDEO_STAGE_LOGGING"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+    if arm.attention_backend == "ATTN_QAT_INFER":
+        from fastvideo.attention.backends.attn_qat_infer import (
+            attn_qat_infer_receipt,
+            is_attn_qat_infer_available,
+        )
+
+        receipt = attn_qat_infer_receipt()
+        print(f"[{arm.name}] {receipt}", flush=True)
+        if not is_attn_qat_infer_available():
+            raise SystemExit(f"ATTN_QAT_INFER requested but unavailable: {receipt}")
+
     from dreamverse.cosmos25_dfd_generation import Cosmos25DFDGenerationBackend
 
     arm_dir = Path(args.output_dir).resolve() / args.role / arm.name
@@ -307,7 +388,8 @@ def _run_arm(args: argparse.Namespace, arm: Arm) -> dict[str, Any]:
         f"regional_compile={arm.bootstrap_inference_torch_compile}) "
         f"continuation(lazy={arm.continuation_lazy_module_load}, "
         f"regional_compile={arm.continuation_inference_torch_compile}) "
-        f"vae_compile=(bootstrap={arm.bootstrap_compile_vae}, continuation={arm.continuation_compile_vae})",
+        f"vae_compile=(bootstrap={arm.bootstrap_compile_vae}:{arm.bootstrap_vae_compile_profile}, "
+        f"continuation={arm.continuation_compile_vae}:{arm.continuation_vae_compile_profile})",
         flush=True)
     initialize_started = time.perf_counter()
     backend.initialize(_model_config(args, arm))
@@ -405,7 +487,23 @@ def _run_matrix(args: argparse.Namespace, arm_names: tuple[str, ...]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     for arm_name in arm_names:
         print(f"[matrix] starting {arm_name}", flush=True)
-        subprocess.run(_arm_command(args, arm_name), check=True)
+        process = subprocess.Popen(_arm_command(args, arm_name), start_new_session=True)
+        try:
+            return_code = process.wait(timeout=args.arm_timeout_seconds)
+        except subprocess.TimeoutExpired:
+            print(
+                f"[matrix] {arm_name} exceeded {args.arm_timeout_seconds}s; terminating its process group",
+                flush=True,
+            )
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+            raise SystemExit(f"Benchmark arm timed out: {arm_name}") from None
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, _arm_command(args, arm_name))
 
     summaries = {
         arm_name: json.loads((output_dir / arm_name / "result.json").read_text(encoding="utf-8"))
