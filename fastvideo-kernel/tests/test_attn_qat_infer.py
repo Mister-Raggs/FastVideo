@@ -5,7 +5,7 @@ Correctness tests for the sageattn_blackwell (ATTN_QAT_INFER) FP4 inference kern
 Compares causal and non-causal outputs against a naive float32 reference to verify
 that the V-row permutation in scaled_fp4_quant_trans_kernel is correct (or absent).
 
-Requires a Blackwell GPU (sm_120a) and fp4attn_cuda / fp4quant_cuda extensions built
+Requires a consumer Blackwell GPU (sm_120a or sm_121a) and fp4attn_cuda / fp4quant_cuda extensions built
 via `cd fastvideo-kernel && ./build.sh`.
 
 Run from the fastvideo-kernel directory:
@@ -24,9 +24,9 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-# The FP4 extensions are only compiled under the sm_120a (Blackwell) arch
+# The FP4 extensions are only compiled under the sm_120a/sm_121a (Blackwell) arch
 # gate; on other GPUs the api import below would die at collection time.
-pytest.importorskip("fp4attn_cuda", reason="ATTN_QAT_INFER FP4 kernels require a sm_120a build")
+pytest.importorskip("fp4attn_cuda", reason="ATTN_QAT_INFER FP4 kernels require a sm_120a or sm_121a build")
 
 from attn_qat_infer.api import sageattn_blackwell
 
