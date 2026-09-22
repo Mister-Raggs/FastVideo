@@ -386,12 +386,18 @@ class Cosmos25TransformerBlock(nn.Module):
             qk_norm=qk_norm,
             supported_attention_backends=supported_attention_backends,
         )
+        # Exact-activation probes show that ATTN_QAT_INFER is accurate and
+        # worthwhile for Cosmos self-attention, but cross-attention errors are
+        # unstable across blocks and denoising timesteps. Keep the component's
+        # requested backend for attn1 and let attn2 fall back to a dense backend.
+        cross_attention_backends = (None if supported_attention_backends is None else tuple(
+            backend for backend in supported_attention_backends if backend is not AttentionBackendEnum.ATTN_QAT_INFER))
         self.attn2 = Cosmos25CrossAttention(
             dim=hidden_size,
             cross_attention_dim=cross_attention_dim,
             num_heads=num_attention_heads,
             qk_norm=qk_norm,
-            supported_attention_backends=supported_attention_backends,
+            supported_attention_backends=cross_attention_backends,
         )
         self.mlp = MLP(hidden_size, int(hidden_size * mlp_ratio), act_type="gelu", bias=False)
 
