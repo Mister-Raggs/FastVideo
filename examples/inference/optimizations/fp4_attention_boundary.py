@@ -33,6 +33,7 @@ crossover, then confirm promising shapes with an end-to-end model-quality A/B.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import importlib.metadata
 import json
 import math
@@ -51,6 +52,8 @@ import torch.nn.functional as F
 REPO_ROOT = Path(__file__).resolve().parents[3]
 KERNEL_ROOT = REPO_ROOT / "fastvideo-kernel"
 SUPPORTED_CAPABILITIES = {(12, 0), (12, 1)}
+
+faulthandler.enable()
 
 
 @dataclass(frozen=True)
@@ -379,6 +382,11 @@ def _print_result(result: dict[str, Any]) -> None:
           f"speedup={timing['speedup_x']:.3f}x")
 
 
+def _write_receipt(output: Path, receipt: dict[str, Any]) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(receipt, indent=2) + "\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preset", choices=("smoke", "sequence", "cross", "padding", "scale", "full"))
@@ -438,7 +446,12 @@ def main() -> int:
     print(f"GPU: {torch.cuda.get_device_name()} (sm_{capability[0]}{capability[1]})")
     print(f"Cases: {len(cases)} | warmup={args.warmup} iterations={args.iterations}")
     results: list[dict[str, Any]] = []
-    for case in cases:
+    receipt = {"metadata": _metadata(args), "active_case": None, "results": results}
+    _write_receipt(output, receipt)
+    for index, case in enumerate(cases, start=1):
+        receipt["active_case"] = asdict(case)
+        _write_receipt(output, receipt)
+        print(f"[{index}/{len(cases)}] running {case.label}", flush=True)
         try:
             result = run_case(
                 case,
@@ -456,11 +469,10 @@ def main() -> int:
             }
             torch.cuda.empty_cache()
         results.append(result)
+        receipt["active_case"] = None
+        _write_receipt(output, receipt)
         _print_result(result)
 
-    receipt = {"metadata": _metadata(args), "results": results}
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(receipt, indent=2) + "\n")
     print(f"Receipt: {output}")
 
     failures = sum(result["status"] != "pass" for result in results)
