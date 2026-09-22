@@ -4,8 +4,9 @@ The generation itself stays on BF16 Torch SDPA. Worker-local hooks inspect the
 normalized, RoPE-applied Q/K/V tensors at early, middle, and late transformer
 blocks and side-compute FP4 versus BF16 outputs. No full activation is saved.
 
-Default workload: distilled Cosmos 2.5 2B, 704x1280x77, four denoising steps,
-guidance 1.0, with blocks 0/14/27 captured at calls 0/2/3. Output remains
+Default workload: distilled Cosmos 2.5 2B, 704x1280x77, four requested steps
+(five model calls with its Karras schedule), guidance 1.0, with blocks 0/14/27
+captured at calls 0/2/4. Output remains
 latent so VAE decode cannot dominate this diagnostic.
 """
 from __future__ import annotations
@@ -47,7 +48,8 @@ def _parse_indices(value: str, *, steps: int) -> list[int] | None:
     if value == "auto":
         return None
     if value == "first,middle,last":
-        return sorted({0, steps // 2, steps - 1})
+        model_calls = steps + 1
+        return sorted({0, model_calls // 2, model_calls - 1})
     try:
         indices = sorted({int(part.strip()) for part in value.split(",") if part.strip()})
     except ValueError as exc:
@@ -90,8 +92,8 @@ def main() -> int:
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
     assert capture_calls is not None
-    if max(capture_calls) >= args.steps:
-        parser.error("capture call indices must be smaller than --steps for the default guidance=1 probe")
+    if max(capture_calls) >= args.steps + 1:
+        parser.error("capture call indices must be smaller than the Cosmos Karras schedule's --steps + 1 calls")
 
     model = str(Path(args.model).expanduser()) if args.model.startswith("~") else args.model
     output = args.output

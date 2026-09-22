@@ -277,21 +277,27 @@ def _capture_exact_activation(
     })
 
     try:
-        reference = sdpa()
-        fp4_result = fp4()
-        torch.cuda.synchronize()
-        record.update({
-            "status": "ok",
-            "activations": {
-                "query": tensor_distribution(query),
-                "key": tensor_distribution(key_tensor),
-                "value": tensor_distribution(value),
-                "sampled_scaled_qk_logits": sampled_logit_distribution(query, key_tensor, softmax_scale),
-            },
-            "output_error": output_error(fp4_result, reference),
-            "timing": _time_pair(sdpa, fp4, state.warmup, state.iterations),
-        })
-        del reference, fp4_result
+        # The hook runs inside the model's BF16 autocast context. Diagnostic
+        # reductions (especially torch.quantile) require real FP32 inputs, and
+        # output-error/logit calculations should not be silently downcast.
+        # Q/K/V themselves remain BF16, so the two attention calls still match
+        # the deployed operator inputs exactly.
+        with torch.autocast(device_type=query.device.type, enabled=False):
+            reference = sdpa()
+            fp4_result = fp4()
+            torch.cuda.synchronize()
+            record.update({
+                "status": "ok",
+                "activations": {
+                    "query": tensor_distribution(query),
+                    "key": tensor_distribution(key_tensor),
+                    "value": tensor_distribution(value),
+                    "sampled_scaled_qk_logits": sampled_logit_distribution(query, key_tensor, softmax_scale),
+                },
+                "output_error": output_error(fp4_result, reference),
+                "timing": _time_pair(sdpa, fp4, state.warmup, state.iterations),
+            })
+            del reference, fp4_result
     except Exception as exc:
         record.update({
             "status": "error",
